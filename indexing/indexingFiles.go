@@ -166,7 +166,7 @@ func (idx *Index) indexDirectory(adjustedPath string, config actionConfig) error
 		// must have been deleted
 		return err
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 
 	dirInfo, err := dir.Stat()
 	if err != nil {
@@ -242,7 +242,7 @@ func (idx *Index) GetFsDirInfo(adjustedPath string) (*iteminfo.FileInfo, error) 
 	if err != nil {
 		return nil, err
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 
 	dirInfo, err := dir.Stat()
 	if err != nil {
@@ -621,7 +621,7 @@ func loadExternalMountPoints() map[string]string {
 		logger.Warnf("unable to read mountinfo: %v", err)
 		return mounts
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {

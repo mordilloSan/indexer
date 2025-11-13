@@ -22,7 +22,7 @@ func ParseSearch(value string) SearchOptions {
 	}
 
 	// Remove the case:exact option from the value
-	value = strings.Replace(value, "case:exact", "", -1)
+	value = strings.ReplaceAll(value, "case:exact", "")
 	value = strings.TrimSpace(value)
 
 	if value == "" {

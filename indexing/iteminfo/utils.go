@@ -67,8 +67,12 @@ func ResolveSymlinks(path string) (string, bool, error) {
 				return path, false, fmt.Errorf("could not read symlink: %s, %v", path, err)
 			}
 
-			// Resolve the symlink's target relative to its directory
-			path = filepath.Join(filepath.Dir(path), target)
+			// If target is absolute, use it directly; otherwise resolve relative to symlink's directory
+			if filepath.IsAbs(target) {
+				path = target
+			} else {
+				path = filepath.Join(filepath.Dir(path), target)
+			}
 		} else {
 			// Not a symlink, check with bundle-aware directory logic
 			isDir := IsDirectory(info)

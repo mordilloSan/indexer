@@ -26,8 +26,6 @@ type ExtendedFileInfo struct {
 	FileInfo
 	Content   string            `json:"content,omitempty"`   // text content of a file, if requested
 	Checksums map[string]string `json:"checksums,omitempty"` // checksums for the file
-	Token     string            `json:"token,omitempty"`     // token for the file -- used for sharing
 	Source    string            `json:"source,omitempty"`    // associated index source for the file
-	Hash      string            `json:"hash,omitempty"`      // hash for the file -- used for sharing
 	RealPath  string            `json:"-"`
 }
