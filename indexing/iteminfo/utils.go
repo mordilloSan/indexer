@@ -9,6 +9,19 @@ import (
 	"strings"
 )
 
+// FileOptions are the options when getting a file info.
+type FileOptions struct {
+	Username   string // username for access control
+	Path       string // realpath
+	Source     string
+	IsDir      bool
+	Expand     bool
+	ReadHeader bool
+	Content    bool
+	Recursive  bool // whether to recursively index directories
+	Metadata   bool // whether to get metadata
+}
+
 func (info *FileInfo) SortItems() {
 	sort.Slice(info.Folders, func(i, j int) bool {
 		nameWithoutExt := strings.Split(info.Folders[i].Name, ".")[0]
@@ -62,4 +75,19 @@ func ResolveSymlinks(path string) (string, bool, error) {
 			return path, isDir, nil
 		}
 	}
+}
+
+func GetParentDirectoryPath(path string) string {
+	if path == "/" || path == "" {
+		return ""
+	}
+	path = strings.TrimSuffix(path, "/") // Remove trailing slash if any
+	lastSlash := strings.LastIndex(path, "/")
+	if lastSlash == -1 {
+		return "" // No parent directory for a relative path without slashes
+	}
+	if lastSlash == 0 {
+		return "/" // If the last slash is the first character, return root
+	}
+	return path[:lastSlash]
 }
