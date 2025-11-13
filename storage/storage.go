@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -73,6 +75,33 @@ func SaveIndex(ctx context.Context, db *sql.DB, idx *indexing.Index) error {
 
 	err = tx.Commit()
 	return err
+}
+
+// SaveIndexToFile persists the index into an on-disk SQLite database by first writing
+// everything into an in-memory database and then exporting it via VACUUM INTO.
+func SaveIndexToFile(ctx context.Context, path string, idx *indexing.Index) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if path == "" {
+		path = defaultDBPath
+	}
+
+	memDB, err := openMemoryDB()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = memDB.Close() }()
+
+	if err := initSchema(ctx, memDB); err != nil {
+		return err
+	}
+
+	if err := SaveIndex(ctx, memDB, idx); err != nil {
+		return err
+	}
+
+	return flushToDisk(ctx, memDB, path)
 }
 
 func initSchema(ctx context.Context, db *sql.DB) error {
@@ -289,4 +318,39 @@ INSERT INTO entries (
 
 	_, err := tx.ExecContext(ctx, builder.String(), args...)
 	return err
+}
+
+func openMemoryDB() (*sql.DB, error) {
+	dsn := fmt.Sprintf("file:indexer_mem?mode=memory&cache=shared&_busy_timeout=%d&_foreign_keys=on", busyTimeoutMS)
+	return sql.Open("sqlite3", dsn)
+}
+
+func flushToDisk(ctx context.Context, db *sql.DB, path string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(absPath)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+
+	if err := os.Remove(absPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	stmt := fmt.Sprintf("VACUUM INTO %s;", quoteLiteral(absPath))
+	_, err = db.ExecContext(ctx, stmt)
+	return err
+}
+
+func quoteLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
