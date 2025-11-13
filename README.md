@@ -30,14 +30,6 @@ Tests:
 go test ./...
 ```
 
-## Publishing Binaries
-
-1. Trigger a build (push to `main`, open/merge a PR, or use the “Run workflow” button).
-2. Once the GitHub Action finishes, download the `indexer-linux-amd64` artifact from the run’s “Artifacts” section.
-3. Rename/sign/compress as desired (e.g., `indexer-v1.0.0-linux-amd64`) and attach it to a GitHub Release or distribute it directly.
-
-Artifacts are produced with `go build -o dist/indexer-linux-amd64 .`; if you need additional targets (ARM, macOS), extend the workflow with a matrix or run `GOOS/GOARCH` builds locally.
-
 ## CLI Usage
 
 ```
@@ -67,24 +59,6 @@ indexer \
 2. **Refresh Mode** – Triggered when one or more `-refresh-path` values are supplied. The program loads the snapshot, re-indexes only the specified paths, and persists again. Ideal after targeted file operations (copy/move/delete) without running a full scan.
 
 Rate limiting prevents full scans from starting more than once every 30 seconds (per DB path). If a run happens too soon, the CLI exits with a “retry in …” message.
-
-## Systemd Integration
-
-Unit files live under `systemd/`:
-
-- `linuxio-indexer.service`
-- `linuxio-indexer.timer`
-
-Install and enable:
-
-```bash
-sudo install -m644 systemd/linuxio-indexer.service /etc/systemd/system/
-sudo install -m644 systemd/linuxio-indexer.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now linuxio-indexer.timer
-```
-
-The service runs `/home/miguelmariz/indexer/bin/indexer -path / -include-hidden -db-path /var/lib/linuxIO/indexer.db -resume` as root every 15 minutes. Adjust the unit to match your binary location or flags.
 
 ## Database Layout & API
 
@@ -124,7 +98,7 @@ Timing metrics (`index_duration_ms`, `export_duration_ms`, `vacuum_duration_ms`)
 
 ## Refresh Workflow (API Hook)
 
-External tools (like LinuxIO) can invoke incremental updates:
+External tools can invoke incremental updates:
 
 ```bash
 /home/miguelmariz/indexer/bin/indexer \
