@@ -2,6 +2,8 @@
 
 Indexer is a Go-based filesystem crawler that snapshots directory trees into a SQLite database. It is designed to power LinuxIO, storing both directories and files (with inode metadata) so the UI and other services can answer questions such as “How big is `/home`?” or “List files under `/var/log`” directly from SQLite without repeated disk scans.
 
+This code is inspired by the code in Filebrowser Quantum - https://github.com/gtsteffaniak/filebrowser
+
 ## Features
 
 - Recursive indexing of any path with optional hidden-file support.
