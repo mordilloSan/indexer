@@ -1,6 +1,9 @@
 GO_INSTALL_DIR := $(HOME)/.go
 GO_BIN ?= go
 BACKEND_DIR ?= $(CURDIR)
+BIN_DIR ?= $(CURDIR)/bin
+BINARY_NAME ?= indexer
+BINARY := $(BIN_DIR)/$(BINARY_NAME)
 GOLANGCI_LINT_MODULE  := github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 GOLANGCI_LINT_VERSION ?= latest
 GOLANGCI_LINT         := $(GO_INSTALL_DIR)/bin/golangci-lint
@@ -9,7 +12,7 @@ GOLANGCI_LINT_OPTS ?= --modules-download-mode=mod
 .ONESHELL:
 SHELL := /bin/bash
 
-.PHONY: ensure-golint golint run
+.PHONY: ensure-golint golint run build run-root test
 
 ensure-golint:
 	@{ set -euo pipefail; \
@@ -54,8 +57,22 @@ endif
 
 run:
 	@set -euo pipefail
-	@echo "🚀 Running indexer from $(BACKEND_DIR)"
+	@echo "🚀 Running indexer from $(BACKEND_DIR) against / "
 	@( cd "$(BACKEND_DIR)" && $(GO_BIN) run . -path / )
+
+run-verbose:
+	@set -euo pipefail
+	@echo "🚀 Running indexer from $(BACKEND_DIR) against / (verbose)"
+	@( cd "$(BACKEND_DIR)" && $(GO_BIN) run . -path / -verbose )
+
+build:
+	@set -euo pipefail
+	@echo "🔧 Building indexer binary at $(BINARY)"
+	@mkdir -p "$(BIN_DIR)"
+	@( cd "$(BACKEND_DIR)" && $(GO_BIN) build -o "$(BINARY)" . )
+	@size="$$(stat -c '%s' "$(BINARY)")"; \
+	 human="$$(ls -lh "$(BINARY)" | awk '{print $$5}')"; \
+	 echo "📦 Binary size: $$size bytes ($$human)"
 
 test:
 	@set -euo pipefail

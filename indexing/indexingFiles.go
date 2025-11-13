@@ -337,7 +337,7 @@ func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjus
 				// Recursively index the subdirectory
 				err = idx.indexDirectory(dirPath, config)
 				if err != nil {
-					logger.Errorf("Failed to index directory %s: %v", dirPath, err)
+					logger.Debugf("Failed to %v", err)
 					continue
 				}
 			}
