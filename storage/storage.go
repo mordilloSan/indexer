@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 
 	"indexer/indexing"
+	"indexer/indexing/iteminfo"
 )
 
 const (
@@ -19,6 +21,15 @@ const (
 	busyTimeoutMS = 5000
 	schemaTimeout = 30 * time.Second
 )
+
+var ErrSnapshotNotFound = errors.New("snapshot not found")
+
+// PersistMetrics captures duration measurements for the indexing workflow.
+type PersistMetrics struct {
+	IndexDuration  time.Duration
+	ExportDuration time.Duration
+	VacuumDuration time.Duration
+}
 
 // Open creates (or reuses) a SQLite database and ensures the schema exists.
 func Open(path string) (*sql.DB, error) {
@@ -43,7 +54,7 @@ func Open(path string) (*sql.DB, error) {
 }
 
 // SaveIndex stores the indexed data inside a single transaction.
-func SaveIndex(ctx context.Context, db *sql.DB, idx *indexing.Index) error {
+func SaveIndex(ctx context.Context, db *sql.DB, idx *indexing.Index, metrics *PersistMetrics) error {
 	if db == nil || idx == nil {
 		return fmt.Errorf("storage: db and index must be provided")
 	}
@@ -63,7 +74,7 @@ func SaveIndex(ctx context.Context, db *sql.DB, idx *indexing.Index) error {
 	}()
 
 	var indexID int64
-	indexID, err = upsertIndex(ctx, tx, idx)
+	indexID, err = upsertIndex(ctx, tx, idx, metrics)
 	if err != nil {
 		return err
 	}
@@ -79,7 +90,7 @@ func SaveIndex(ctx context.Context, db *sql.DB, idx *indexing.Index) error {
 
 // SaveIndexToFile persists the index into an on-disk SQLite database by first writing
 // everything into an in-memory database and then exporting it via VACUUM INTO.
-func SaveIndexToFile(ctx context.Context, path string, idx *indexing.Index) error {
+func SaveIndexToFile(ctx context.Context, path string, idx *indexing.Index, metrics *PersistMetrics) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -97,11 +108,40 @@ func SaveIndexToFile(ctx context.Context, path string, idx *indexing.Index) erro
 		return err
 	}
 
-	if err := SaveIndex(ctx, memDB, idx); err != nil {
+	exportStart := time.Now()
+	if err := SaveIndex(ctx, memDB, idx, metrics); err != nil {
 		return err
 	}
+	if metrics != nil {
+		metrics.ExportDuration = time.Since(exportStart)
+	}
 
-	return flushToDisk(ctx, memDB, path)
+	vacuumStart := time.Now()
+	if err := flushToDisk(ctx, memDB, path); err != nil {
+		return err
+	}
+	if metrics != nil {
+		metrics.VacuumDuration = time.Since(vacuumStart)
+	}
+
+	return nil
+}
+
+// LoadSnapshotIntoIndex loads the previously persisted directory tree for the
+// given index name (if available) and seeds the provided Index for quick scans.
+func LoadSnapshotIntoIndex(ctx context.Context, path, name string, idx *indexing.Index) error {
+	if idx == nil {
+		return fmt.Errorf("storage: index cannot be nil")
+	}
+	dirs, err := loadSnapshotDirectories(ctx, path, name)
+	if err != nil {
+		return err
+	}
+	if len(dirs) == 0 {
+		return ErrSnapshotNotFound
+	}
+	idx.ApplySnapshot(dirs)
+	return nil
 }
 
 func initSchema(ctx context.Context, db *sql.DB) error {
@@ -122,6 +162,9 @@ func initSchema(ctx context.Context, db *sql.DB) error {
 			disk_used INTEGER NOT NULL DEFAULT 0,
 			disk_total INTEGER NOT NULL DEFAULT 0,
 			last_indexed INTEGER NOT NULL,
+			index_duration_ms INTEGER NOT NULL DEFAULT 0,
+			export_duration_ms INTEGER NOT NULL DEFAULT 0,
+			vacuum_duration_ms INTEGER NOT NULL DEFAULT 0,
 			created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 		);
 	`); err != nil {
@@ -162,19 +205,35 @@ func initSchema(ctx context.Context, db *sql.DB) error {
 	if err := ensureColumn(ctx, db, "entries", "inode", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	if err := ensureColumn(ctx, db, "indexes", "index_duration_ms", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, "indexes", "export_duration_ms", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, "indexes", "vacuum_duration_ms", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 
 	return nil
 }
 
-func upsertIndex(ctx context.Context, tx *sql.Tx, idx *indexing.Index) (int64, error) {
+func upsertIndex(ctx context.Context, tx *sql.Tx, idx *indexing.Index, metrics *PersistMetrics) (int64, error) {
 	now := time.Now().UTC().Unix()
+	var indexDuration, exportDuration, vacuumDuration int64
+	if metrics != nil {
+		indexDuration = durationMillis(metrics.IndexDuration)
+		exportDuration = durationMillis(metrics.ExportDuration)
+		vacuumDuration = durationMillis(metrics.VacuumDuration)
+	}
 
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO indexes (
 			name, root_path, source, include_hidden,
 			num_dirs, num_files, total_size, disk_used,
-			disk_total, last_indexed
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			disk_total, last_indexed,
+			index_duration_ms, export_duration_ms, vacuum_duration_ms
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET
 			root_path=excluded.root_path,
 			source=excluded.source,
@@ -184,7 +243,10 @@ func upsertIndex(ctx context.Context, tx *sql.Tx, idx *indexing.Index) (int64, e
 			total_size=excluded.total_size,
 			disk_used=excluded.disk_used,
 			disk_total=excluded.disk_total,
-			last_indexed=excluded.last_indexed;
+			last_indexed=excluded.last_indexed,
+			index_duration_ms=excluded.index_duration_ms,
+			export_duration_ms=excluded.export_duration_ms,
+			vacuum_duration_ms=excluded.vacuum_duration_ms;
 	`,
 		idx.Name,
 		idx.Path,
@@ -196,6 +258,9 @@ func upsertIndex(ctx context.Context, tx *sql.Tx, idx *indexing.Index) (int64, e
 		int64(idx.DiskUsed),
 		int64(idx.DiskTotal),
 		now,
+		indexDuration,
+		exportDuration,
+		vacuumDuration,
 	)
 	if err != nil {
 		return 0, err
@@ -353,4 +418,184 @@ func flushToDisk(ctx context.Context, db *sql.DB, path string) error {
 
 func quoteLiteral(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+func durationMillis(d time.Duration) int64 {
+	if d <= 0 {
+		return 0
+	}
+	return d.Milliseconds()
+}
+
+func loadSnapshotDirectories(ctx context.Context, path, name string) (map[string]*iteminfo.FileInfo, error) {
+	if path == "" {
+		path = defaultDBPath
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(absPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrSnapshotNotFound
+		}
+		return nil, err
+	}
+
+	dsn := fmt.Sprintf("file:%s?mode=ro&_busy_timeout=%d&_foreign_keys=on", absPath, busyTimeoutMS)
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = db.Close() }()
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var indexID int64
+	scanErr := db.QueryRowContext(ctx, `SELECT id FROM indexes WHERE name = ?`, name).Scan(&indexID)
+	if errors.Is(scanErr, sql.ErrNoRows) {
+		return nil, ErrSnapshotNotFound
+	}
+	if scanErr != nil {
+		return nil, scanErr
+	}
+
+	dirs, err := fetchDirectoryEntries(ctx, db, indexID)
+	if err != nil {
+		return nil, err
+	}
+	if len(dirs) == 0 {
+		return nil, ErrSnapshotNotFound
+	}
+	if err := attachChildren(ctx, db, indexID, dirs); err != nil {
+		return nil, err
+	}
+	return dirs, nil
+}
+
+func fetchDirectoryEntries(ctx context.Context, db *sql.DB, indexID int64) (map[string]*iteminfo.FileInfo, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT relative_path, name, size, mod_time, hidden, inode
+		FROM entries
+		WHERE index_id = ? AND is_dir = 1;
+	`, indexID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	dirs := make(map[string]*iteminfo.FileInfo)
+	for rows.Next() {
+		var relPath, name string
+		var size, modUnix, inode int64
+		var hiddenInt int
+		if err := rows.Scan(&relPath, &name, &size, &modUnix, &hiddenInt, &inode); err != nil {
+			return nil, err
+		}
+		key := dirMapKey(relPath)
+		info := &iteminfo.FileInfo{
+			Path: key,
+		}
+		info.ItemInfo = iteminfo.ItemInfo{
+			Name:    name,
+			Size:    size,
+			ModTime: time.Unix(modUnix, 0).UTC(),
+			Type:    "directory",
+			Hidden:  hiddenInt == 1,
+			Inode:   uint64(inode),
+		}
+		dirs[key] = info
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return dirs, nil
+}
+
+func attachChildren(ctx context.Context, db *sql.DB, indexID int64, dirs map[string]*iteminfo.FileInfo) error {
+	// attach folders
+	for path, info := range dirs {
+		parent := parentDirKey(path)
+		if parent == "" || parent == path {
+			continue
+		}
+		if parentInfo, ok := dirs[parent]; ok {
+			parentInfo.Folders = append(parentInfo.Folders, info.ItemInfo)
+		}
+	}
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT relative_path, name, size, mod_time, hidden, inode
+		FROM entries
+		WHERE index_id = ? AND is_dir = 0;
+	`, indexID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var relPath, name string
+		var size, modUnix, inode int64
+		var hiddenInt int
+		if err := rows.Scan(&relPath, &name, &size, &modUnix, &hiddenInt, &inode); err != nil {
+			return err
+		}
+		parent := parentDirKey(dirMapKey(relPath))
+		if parent == "" {
+			parent = "/"
+		}
+		parentInfo, ok := dirs[parent]
+		if !ok {
+			continue
+		}
+		item := iteminfo.ItemInfo{
+			Name:    name,
+			Size:    size,
+			ModTime: time.Unix(modUnix, 0).UTC(),
+			Type:    "file",
+			Hidden:  hiddenInt == 1,
+			Inode:   uint64(inode),
+		}
+		parentInfo.Files = append(parentInfo.Files, item)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, info := range dirs {
+		info.SortItems()
+	}
+	return nil
+}
+
+func dirMapKey(relPath string) string {
+	if relPath == "" || relPath == "/" {
+		return "/"
+	}
+	clean := "/" + strings.Trim(relPath, "/")
+	if clean == "/" {
+		return "/"
+	}
+	return clean + "/"
+}
+
+func parentDirKey(path string) string {
+	if path == "" || path == "/" {
+		return "/"
+	}
+	trimmed := strings.TrimSuffix(path, "/")
+	if trimmed == "" {
+		return "/"
+	}
+	parent := filepath.Dir(trimmed)
+	if parent == "." || parent == "" {
+		return "/"
+	}
+	if parent == "/" {
+		return "/"
+	}
+	return "/" + strings.Trim(parent, "/") + "/"
 }

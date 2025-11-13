@@ -57,6 +57,7 @@ type Index struct {
 	processedInodes            map[uint64]struct{}           `json:"-"` // tracks processed inodes for hardlinks
 	totalSize                  uint64                        `json:"-"` // total size
 	mu                         sync.RWMutex                  `json:"-"` // protects concurrent access
+	quickScan                  bool                          `json:"-"`
 }
 
 var (
@@ -126,13 +127,72 @@ func Initialize(name string, path string, source string, includeHidden bool) *In
 	return newIndex
 }
 
+// ApplySnapshot seeds the index with previously stored directory information
+// so subsequent indexing can perform quick scans against unchanged paths.
+func (idx *Index) ApplySnapshot(dirs map[string]*iteminfo.FileInfo) {
+	if len(dirs) == 0 {
+		return
+	}
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	idx.Directories = dirs
+	idx.DirectoriesLedger = make(map[string]struct{}, len(dirs))
+	for path := range dirs {
+		idx.DirectoriesLedger[path] = struct{}{}
+	}
+	idx.quickScan = true
+}
+
+// RefreshAbsolutePath re-indexes a specific filesystem path (file or directory).
+// For files, the containing directory is refreshed.
+func (idx *Index) RefreshAbsolutePath(absPath string, recursive bool) error {
+	if absPath == "" {
+		return fmt.Errorf("path cannot be empty")
+	}
+
+	cleanRoot := filepath.Clean(idx.Path)
+	target, err := filepath.Abs(absPath)
+	if err != nil {
+		return err
+	}
+	if target != cleanRoot && !strings.HasPrefix(target, cleanRoot+string(os.PathSeparator)) {
+		return fmt.Errorf("path %s is outside indexed root %s", target, cleanRoot)
+	}
+
+	info, statErr := os.Stat(target)
+	isDir := statErr == nil && info.IsDir()
+	indexPath := idx.MakeIndexPath(target)
+
+	if statErr != nil {
+		if os.IsNotExist(statErr) {
+			parent := filepath.Dir(target)
+			indexPath = idx.MakeIndexPath(parent)
+			isDir = true
+		} else {
+			return statErr
+		}
+	}
+
+	opts := iteminfo.FileOptions{
+		Path:      indexPath,
+		IsDir:     true,
+		Recursive: recursive && isDir,
+	}
+	return idx.RefreshFileInfo(opts)
+}
+
 // StartIndexing begins indexing the configured path
 func (idx *Index) StartIndexing() error {
 	idx.SetStatus(INDEXING)
 	logger.Infof("starting indexing for [%s] at path [%s]", idx.Name, idx.Path)
 
+	idx.mu.Lock()
+	quick := idx.quickScan
+	idx.quickScan = false
+	idx.mu.Unlock()
+
 	config := actionConfig{
-		Quick:     false,
+		Quick:     quick,
 		Recursive: true,
 	}
 

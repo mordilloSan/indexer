@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,6 +23,12 @@ func main() {
 	caseSensitive := flag.Bool("case-sensitive", false, "Perform case-sensitive search")
 	verbose := flag.Bool("verbose", false, "Enable verbose logging (DEBUG level)")
 	includeHidden := flag.Bool("include-hidden", false, "Include hidden files and directories (starting with .)")
+	dbPathFlag := flag.String("db-path", "", "Path to the SQLite database file (overrides INDEXER_DB_PATH)")
+	resumeFlag := flag.Bool("resume", false, "Reuse the previous database snapshot to speed up re-indexing")
+	refreshRecursive := flag.Bool("refresh-recursive", false, "Recursively refresh directories supplied via -refresh-path")
+
+	var refreshPaths stringSliceFlag
+	flag.Var(&refreshPaths, "refresh-path", "Absolute file or directory to refresh without a full scan (repeatable)")
 
 	flag.Parse()
 
@@ -44,9 +52,37 @@ func main() {
 		}
 	}
 
+	dbPath := *dbPathFlag
+	if dbPath == "" {
+		dbPath = os.Getenv("INDEXER_DB_PATH")
+	}
+	if dbPath == "" {
+		dbPath = "indexer.db"
+	}
+
 	// Initialize the indexer
 	logger.Infof("Initializing indexer for path: %s", *indexPath)
 	index := indexing.Initialize(name, *indexPath, *indexPath, *includeHidden)
+
+	if len(refreshPaths) > 0 {
+		if err := runRefreshMode(index, name, dbPath, refreshPaths, *refreshRecursive); err != nil {
+			logger.Errorf("Refresh failed: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *resumeFlag {
+		if err := storage.LoadSnapshotIntoIndex(context.Background(), dbPath, name, index); err != nil {
+			if !errors.Is(err, storage.ErrSnapshotNotFound) {
+				logger.Warnf("Unable to load previous snapshot: %v", err)
+			} else {
+				logger.Debugf("No previous snapshot found for %s", name)
+			}
+		} else {
+			logger.Infof("Loaded previous snapshot for %s; quick scan enabled", name)
+		}
+	}
 
 	// Start indexing with timer
 	logger.Infof("Starting indexing...")
@@ -69,11 +105,17 @@ func main() {
 	saveCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
-	if err := storage.SaveIndexToFile(saveCtx, "", index); err != nil {
+	metrics := &storage.PersistMetrics{IndexDuration: duration}
+	if err := storage.SaveIndexToFile(saveCtx, dbPath, index, metrics); err != nil {
 		logger.Errorf("Failed to persist index: %v", err)
 		os.Exit(1)
 	}
-	logger.Infof("Saved index '%s' to database", index.Name)
+	logger.Infof(
+		"Saved index '%s' to database (export: %v, vacuum: %v)",
+		index.Name,
+		metrics.ExportDuration,
+		metrics.VacuumDuration,
+	)
 
 	// Perform search if search term provided
 	if *searchTerm != "" {
@@ -93,4 +135,73 @@ func main() {
 			logger.Infof("Total matches: %d", len(results))
 		}
 	}
+}
+
+func runRefreshMode(idx *indexing.Index, indexName, dbPath string, refreshPaths []string, recursive bool) error {
+	if dbPath == "" {
+		return fmt.Errorf("refresh mode requires -db-path or INDEXER_DB_PATH")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := storage.LoadSnapshotIntoIndex(ctx, dbPath, indexName, idx); err != nil {
+		return fmt.Errorf("load snapshot: %w", err)
+	}
+
+	start := time.Now()
+	var refreshed int
+	for _, raw := range refreshPaths {
+		absPath, err := normalizeTargetPath(idx.Path, raw)
+		if err != nil {
+			return err
+		}
+		if err := idx.RefreshAbsolutePath(absPath, recursive); err != nil {
+			return fmt.Errorf("refresh %s: %w", absPath, err)
+		}
+		refreshed++
+	}
+
+	saveCtx, cancelSave := context.WithTimeout(context.Background(), time.Minute)
+	defer cancelSave()
+	metrics := &storage.PersistMetrics{IndexDuration: time.Since(start)}
+
+	if err := storage.SaveIndexToFile(saveCtx, dbPath, idx, metrics); err != nil {
+		return fmt.Errorf("persist refresh: %w", err)
+	}
+
+	logger.Infof("Refreshed %d path(s); export=%v vacuum=%v", refreshed, metrics.ExportDuration, metrics.VacuumDuration)
+	return nil
+}
+
+type stringSliceFlag []string
+
+func (s *stringSliceFlag) String() string {
+	return strings.Join(*s, ",")
+}
+
+func (s *stringSliceFlag) Set(value string) error {
+	if value == "" {
+		return fmt.Errorf("refresh-path cannot be empty")
+	}
+	*s = append(*s, value)
+	return nil
+}
+
+func normalizeTargetPath(root, candidate string) (string, error) {
+	if candidate == "" {
+		return "", fmt.Errorf("path cannot be empty")
+	}
+	cleanRoot := filepath.Clean(root)
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(cleanRoot, candidate)
+	}
+	abs, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", err
+	}
+	if abs != cleanRoot && !strings.HasPrefix(abs, cleanRoot+string(os.PathSeparator)) {
+		return "", fmt.Errorf("path %s is outside indexed root %s", abs, cleanRoot)
+	}
+	return abs, nil
 }
