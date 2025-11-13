@@ -509,10 +509,8 @@ func (idx *Index) shouldSkip(isDir bool, isHidden bool, fullCombined string) boo
 		}
 	}
 
-	// Optionally skip hidden files and directories
-	// You can add a field to Index struct if you want this configurable
-	// For now, we'll skip hidden items
-	if isHidden {
+	// Skip hidden files and directories unless includeHidden is true
+	if isHidden && !idx.includeHidden {
 		return true
 	}
 
