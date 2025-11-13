@@ -12,7 +12,7 @@ GOLANGCI_LINT_OPTS ?= --modules-download-mode=mod
 .ONESHELL:
 SHELL := /bin/bash
 
-.PHONY: ensure-golint golint run build run-root test
+.PHONY: ensure-golint golint run build run-root test create-dev
 
 ensure-golint:
 	@{ set -euo pipefail; \
@@ -81,3 +81,17 @@ test:
 	   skipped="$$(grep -c '^--- SKIP:' "$$tmp" || true)"; \
 	   echo "📊 Summary: $$passed passed, $$failed failed, $$skipped skipped."; \
 	   test "$$failed" -eq 0 )
+
+create-dev:
+	@set -euo pipefail
+	@read -p "Enter new tag name (e.g. v1.2.3): " tag; \
+	if [ -z "$$tag" ]; then echo "❌ Tag name is required"; exit 1; fi; \
+	if git rev-parse "$$tag" >/dev/null 2>&1; then echo "❌ Ref '$$tag' already exists"; exit 1; fi; \
+	echo "🏷  Creating tag '$$tag' at HEAD..."; \
+	git tag "$$tag"; \
+	default_branch="dev/$$tag"; \
+	read -p "Enter branch name [$$default_branch]: " branch; \
+	if [ -z "$$branch" ]; then branch="$$default_branch"; fi; \
+	echo "🌱 Creating branch '$$branch' from tag '$$tag'..."; \
+	git checkout -b "$$branch" "$$tag"; \
+	echo "✅ Tag '$$tag' and branch '$$branch' created and checked out."

@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/mordilloSan/go_logger/logger"
@@ -17,15 +18,13 @@ import (
 )
 
 var (
-	// ErrNotIndexed is returned when a path is not indexed
 	ErrNotIndexed = errors.New("path not indexed")
 )
 
 // actionConfig holds all configuration options for indexing operations
 type actionConfig struct {
-	Quick         bool // whether to perform a quick scan (skip unchanged directories)
-	Recursive     bool // whether to recursively index subdirectories
-	IsRoutineScan bool // whether this is a routine/scheduled scan (vs initial indexing)
+	Quick     bool // whether to perform a quick scan (skip unchanged directories)
+	Recursive bool // whether to recursively index subdirectories
 }
 
 // reduced index is json exposed to the client
@@ -72,6 +71,14 @@ const (
 	INDEXING    IndexStatus = "indexing"
 	UNAVAILABLE IndexStatus = "unavailable"
 )
+
+// SearchResult represents a search match
+type SearchResult struct {
+	Path  string // full path to the file/folder
+	Name  string // name of the file/folder
+	Size  int64  // size in bytes
+	IsDir bool   // whether it's a directory
+}
 
 var (
 	linuxSystemPaths = []string{"/proc", "/dev"}
@@ -586,11 +593,6 @@ func (idx *Index) shouldSkip(isDir bool, isHidden bool, fullCombined string) boo
 	return false
 }
 
-type DiskUsage struct {
-	Total uint64 `json:"total"`
-	Used  uint64 `json:"used"`
-}
-
 func (idx *Index) SetUsage(totalBytes uint64) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
@@ -749,14 +751,6 @@ func isExternalFilesystem(fsType, source string) bool {
 	return false
 }
 
-// SearchResult represents a search match
-type SearchResult struct {
-	Path  string // full path to the file/folder
-	Name  string // name of the file/folder
-	Size  int64  // size in bytes
-	IsDir bool   // whether it's a directory
-}
-
 // Search finds all files and folders matching the search term
 func (idx *Index) Search(searchTerm string, caseSensitive bool) []SearchResult {
 	searchOpts := iteminfo.SearchOptions{
@@ -875,4 +869,18 @@ func normalizeIndexPath(path string) string {
 		path = "/" + path
 	}
 	return path
+}
+
+func getFileDetails(sys any) (uint64, uint64, uint64, bool) {
+	if stat, ok := sys.(*syscall.Stat_t); ok {
+		// Use allocated size for `du`-like behavior
+		realSize := uint64(stat.Blocks * 512)
+		return realSize, uint64(stat.Nlink), stat.Ino, true
+	}
+	return 0, 1, 0, false
+}
+
+// MakeIndexPathPlatform normalizes paths for Linux
+func (idx *Index) MakeIndexPathPlatform(path string) string {
+	return "/" + strings.TrimPrefix(path, "/")
 }
