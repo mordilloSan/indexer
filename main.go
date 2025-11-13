@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -82,6 +83,12 @@ func main() {
 		} else {
 			logger.Infof("Loaded previous snapshot for %s; quick scan enabled", name)
 		}
+	}
+
+	rateLimiter := newRateLimiter(dbPath)
+	if err := rateLimiter.Enforce(); err != nil {
+		logger.Errorf("Aborting: %v", err)
+		os.Exit(1)
 	}
 
 	// Start indexing with timer
@@ -204,4 +211,55 @@ func normalizeTargetPath(root, candidate string) (string, error) {
 		return "", fmt.Errorf("path %s is outside indexed root %s", abs, cleanRoot)
 	}
 	return abs, nil
+}
+
+type rateLimiter struct {
+	path        string
+	cooldown    time.Duration
+	clock       func() time.Time
+	lastRunPath string
+}
+
+func newRateLimiter(dbPath string) *rateLimiter {
+	return &rateLimiter{
+		path:     dbPath,
+		cooldown: 30 * time.Second,
+		clock:    time.Now,
+	}
+}
+
+func (r *rateLimiter) Enforce() error {
+	if r.path == "" {
+		return nil
+	}
+	statePath := r.stateFilePath()
+	data, err := os.ReadFile(statePath)
+	if err == nil {
+		lastUnix, parseErr := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+		if parseErr == nil {
+			last := time.Unix(lastUnix, 0)
+			if remaining := r.cooldown - r.clock().Sub(last); remaining > 0 {
+				return fmt.Errorf("indexer recently ran; retry in %v", remaining.Round(time.Second))
+			}
+		}
+	}
+
+	tmp := fmt.Sprintf("%d", r.clock().Unix())
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(statePath, []byte(tmp), 0o644)
+}
+
+func (r *rateLimiter) stateFilePath() string {
+	if r.lastRunPath != "" {
+		return r.lastRunPath
+	}
+	base := filepath.Base(r.path)
+	if base == "." || base == "" {
+		base = "indexer"
+	}
+	file := fmt.Sprintf(".%s.last_run", base)
+	r.lastRunPath = filepath.Join(os.TempDir(), "indexer", file)
+	return r.lastRunPath
 }
