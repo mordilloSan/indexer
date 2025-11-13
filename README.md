@@ -20,11 +20,21 @@ go mod download
 make build   # writes ./bin/indexer
 ```
 
+CI builds run automatically on every push & PR via `.github/workflows/build.yml`. Each run uploads a prebuilt Linux AMD64 binary (`indexer-linux-amd64`) as an artifact you can download from the workflow summary. Use those artifacts to publish releases or distribute builds without compiling locally.
+
 Tests:
 
 ```bash
 go test ./...
 ```
+
+## Publishing Binaries
+
+1. Trigger a build (push to `main`, open/merge a PR, or use the “Run workflow” button).
+2. Once the GitHub Action finishes, download the `indexer-linux-amd64` artifact from the run’s “Artifacts” section.
+3. Rename/sign/compress as desired (e.g., `indexer-v1.0.0-linux-amd64`) and attach it to a GitHub Release or distribute it directly.
+
+Artifacts are produced with `go build -o dist/indexer-linux-amd64 .`; if you need additional targets (ARM, macOS), extend the workflow with a matrix or run `GOOS/GOARCH` builds locally.
 
 ## CLI Usage
 
