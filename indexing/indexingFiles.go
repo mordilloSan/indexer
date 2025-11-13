@@ -844,7 +844,10 @@ func (idx *Index) MakeIndexPath(path string) string {
 		path = strings.TrimPrefix(path, ".")
 	}
 	path = strings.TrimPrefix(path, idx.Path)
-	path = idx.MakeIndexPathPlatform(path)
+	// Normalize to a canonical Linux-style index path:
+	// - ensure a single leading "/"
+	// - ensure a trailing "/" so directories look like "/foo/"
+	path = "/" + strings.TrimPrefix(path, "/")
 	path = strings.TrimSuffix(path, "/") + "/"
 	return path
 }
@@ -878,9 +881,4 @@ func getFileDetails(sys any) (uint64, uint64, uint64, bool) {
 		return realSize, uint64(stat.Nlink), stat.Ino, true
 	}
 	return 0, 1, 0, false
-}
-
-// MakeIndexPathPlatform normalizes paths for Linux
-func (idx *Index) MakeIndexPathPlatform(path string) string {
-	return "/" + strings.TrimPrefix(path, "/")
 }

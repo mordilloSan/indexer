@@ -1,6 +1,6 @@
 # Indexer
 
-Indexer is a Go-based filesystem crawler that snapshots directory trees into a SQLite database. It is designed to power LinuxIO, storing both directories and files (with inode metadata) so the UI and other services can answer questions such as “How big is `/home`?” or “List files under `/var/log`” directly from SQLite without repeated disk scans.
+Indexer is a Go-based filesystem crawler that snapshots directory trees into a SQLite database. It is designed to power LinuxIO, storing both directories and files (with inode metadata) so the UI and other services can answer questions such as “How big is `/home`?” or “List files under `/var/log`” directly from SQLite without repeated disk scans. The implementation is Linux-only by design.
 
 This code is inspired by the code in Filebrowser Quantum - https://github.com/gtsteffaniak/filebrowser
 
@@ -118,5 +118,6 @@ This workflow only touches the specified directories and persists the snapshot a
 - Hidden files are skipped unless `-include-hidden` is set.
 - The indexer runs with the permissions of the invoking user; to capture system-wide paths, run it as root.
 - If the filesystem changes during a scan, a subsequent pass (full or refresh) will reconcile the DB.
+- Internal index paths are canonicalized as Linux-style directory paths (always a leading `/` and a trailing `/` for directories, for example `/` or `/var/log/`); other platforms are not supported.
 
 Feel free to tailor the flags, systemd units, and queries to your environment. Contributions and issues are welcome!
