@@ -189,39 +189,13 @@ func replaceEntries(ctx context.Context, tx *sql.Tx, indexID int64, entries []in
 		return nil
 	}
 
-	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO entries (
-			index_id,
-			relative_path,
-			absolute_path,
-			name,
-			size,
-			mod_time,
-			type,
-			hidden,
-			is_dir,
-			inode
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-	`)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = stmt.Close() }()
-
-	for _, entry := range entries {
-		if _, err := stmt.ExecContext(
-			ctx,
-			indexID,
-			entry.RelativePath,
-			entry.AbsolutePath,
-			entry.Name,
-			entry.Size,
-			entry.ModTime.Unix(),
-			entry.Type,
-			boolToInt(entry.Hidden),
-			boolToInt(entry.IsDir),
-			int64(entry.Inode),
-		); err != nil {
+	const batchSize = 500
+	for start := 0; start < len(entries); start += batchSize {
+		end := start + batchSize
+		if end > len(entries) {
+			end = len(entries)
+		}
+		if err := insertEntriesBatch(ctx, tx, indexID, entries[start:end]); err != nil {
 			return err
 		}
 	}
@@ -266,5 +240,53 @@ func ensureColumn(ctx context.Context, db *sql.DB, table, column, definition str
 
 	stmt := fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s;`, table, column, definition)
 	_, err = db.ExecContext(ctx, stmt)
+	return err
+}
+
+func insertEntriesBatch(ctx context.Context, tx *sql.Tx, indexID int64, batch []indexing.IndexEntry) error {
+	if len(batch) == 0 {
+		return nil
+	}
+
+	const insertPrefix = `
+INSERT INTO entries (
+	index_id,
+	relative_path,
+	absolute_path,
+	name,
+	size,
+	mod_time,
+	type,
+	hidden,
+	is_dir,
+	inode
+) VALUES `
+	const singlePlaceholder = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+
+	var builder strings.Builder
+	builder.Grow(len(insertPrefix) + len(singlePlaceholder)*len(batch) + len(batch))
+	builder.WriteString(insertPrefix)
+
+	args := make([]any, 0, len(batch)*10)
+	for i, entry := range batch {
+		if i > 0 {
+			builder.WriteByte(',')
+		}
+		builder.WriteString(singlePlaceholder)
+		args = append(args,
+			indexID,
+			entry.RelativePath,
+			entry.AbsolutePath,
+			entry.Name,
+			entry.Size,
+			entry.ModTime.Unix(),
+			entry.Type,
+			boolToInt(entry.Hidden),
+			boolToInt(entry.IsDir),
+			int64(entry.Inode),
+		)
+	}
+
+	_, err := tx.ExecContext(ctx, builder.String(), args...)
 	return err
 }
