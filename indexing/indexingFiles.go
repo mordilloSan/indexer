@@ -168,14 +168,19 @@ func (idx *Index) RefreshAbsolutePath(absPath string, recursive bool) error {
 			parent := filepath.Dir(target)
 			indexPath = idx.MakeIndexPath(parent)
 			isDir = true
+			target = parent
 		} else {
 			return statErr
 		}
 	}
 
+	if !isDir {
+		indexPath = strings.TrimSuffix(indexPath, "/")
+	}
+
 	opts := iteminfo.FileOptions{
 		Path:      indexPath,
-		IsDir:     true,
+		IsDir:     isDir,
 		Recursive: recursive && isDir,
 	}
 	return idx.RefreshFileInfo(opts)

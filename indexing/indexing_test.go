@@ -2,8 +2,10 @@ package indexing
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
+	"indexer/indexing/iteminfo"
 	"indexer/indexing/testhelpers"
 )
 
@@ -197,6 +199,82 @@ func TestIndexDirectory_NestedStructure(t *testing.T) {
 			t.Errorf("Expected file %s not found in %s", fileName, archivePath)
 		}
 	}
+}
+
+func TestRefreshAbsolutePath(t *testing.T) {
+	mock := testhelpers.NewMockFileSystem(t)
+	defer mock.Cleanup()
+	mock.CreateStandardTestStructure()
+
+	idx := Initialize("test", mock.Root, mock.Root, true)
+	if err := idx.StartIndexing(); err != nil {
+		t.Fatalf("StartIndexing failed: %v", err)
+	}
+
+	targetDir := filepath.Join(mock.Root, "documents")
+	newFile := filepath.Join(targetDir, "newdoc.txt")
+	if err := os.WriteFile(newFile, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write new file: %v", err)
+	}
+
+	if err := idx.RefreshAbsolutePath(newFile, false); err != nil {
+		t.Fatalf("refresh file: %v", err)
+	}
+
+	dirInfo, ok := idx.Directories["/documents/"]
+	if !ok {
+		t.Fatalf("documents directory missing from index")
+	}
+	if !containsFile(dirInfo.Files, "newdoc.txt") {
+		t.Fatalf("new file not found after refresh")
+	}
+
+	if err := os.Remove(newFile); err != nil {
+		t.Fatalf("remove file: %v", err)
+	}
+	if err := idx.RefreshAbsolutePath(newFile, false); err != nil {
+		t.Fatalf("refresh after delete: %v", err)
+	}
+	dirInfo, ok = idx.Directories["/documents/"]
+	if !ok {
+		t.Fatalf("documents directory missing after delete")
+	}
+	if containsFile(dirInfo.Files, "newdoc.txt") {
+		t.Fatalf("deleted file still present after refresh")
+	}
+
+	nestedDir := filepath.Join(mock.Root, "photos", "newset")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	nestedFile := filepath.Join(nestedDir, "image.jpg")
+	if err := os.WriteFile(nestedFile, []byte("data"), 0o644); err != nil {
+		t.Fatalf("write nested file: %v", err)
+	}
+	if err := idx.RefreshAbsolutePath(nestedDir, true); err != nil {
+		t.Fatalf("refresh recursive dir: %v", err)
+	}
+	dirInfo, ok = idx.Directories["/photos/newset/"]
+	if !ok {
+		t.Fatalf("new directory not indexed")
+	}
+	if !containsFile(dirInfo.Files, "image.jpg") {
+		t.Fatalf("nested file missing after recursive refresh")
+	}
+
+	outside := filepath.Join(os.TempDir(), "outside.txt")
+	if err := idx.RefreshAbsolutePath(outside, false); err == nil {
+		t.Fatalf("expected error for path outside root")
+	}
+}
+
+func containsFile(items []iteminfo.ItemInfo, name string) bool {
+	for _, item := range items {
+		if item.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func TestGetTotalSize(t *testing.T) {
