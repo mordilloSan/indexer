@@ -1,4 +1,6 @@
 GO_INSTALL_DIR := $(HOME)/.go
+GO_BIN ?= go
+BACKEND_DIR ?= $(CURDIR)
 GOLANGCI_LINT_MODULE  := github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 GOLANGCI_LINT_VERSION ?= latest
 GOLANGCI_LINT         := $(GO_INSTALL_DIR)/bin/golangci-lint
@@ -6,6 +8,8 @@ GOLANGCI_LINT_OPTS ?= --modules-download-mode=mod
 
 .ONESHELL:
 SHELL := /bin/bash
+
+.PHONY: ensure-golint golint run
 
 ensure-golint:
 	@{ set -euo pipefail; \
@@ -47,3 +51,21 @@ endif
 	@echo "🔍 Running golangci-lint..."
 	@( cd "$(BACKEND_DIR)" && "$(GOLANGCI_LINT)" run --fix ./... --timeout 3m $(GOLANGCI_LINT_OPTS) )
 	@echo "✅ Go Linting Ok!"
+
+run:
+	@set -euo pipefail
+	@echo "🚀 Running indexer from $(BACKEND_DIR)"
+	@( cd "$(BACKEND_DIR)" && $(GO_BIN) run . -path / )
+
+test:
+	@set -euo pipefail
+	@echo "🧪 Running tests from $(BACKEND_DIR)"
+	@( cd "$(BACKEND_DIR)" && \
+	   tmp="$$(mktemp)"; \
+	   trap 'rm -f "$$tmp"' EXIT; \
+	   { $(GO_BIN) test ./... -timeout 5m -count=1 -run . -v 2>&1 | grep -v '\[no test files\]'; } | tee "$$tmp"; \
+	   passed="$$(grep -c '^--- PASS:' "$$tmp" || true)"; \
+	   failed="$$(grep -c '^--- FAIL:' "$$tmp" || true)"; \
+	   skipped="$$(grep -c '^--- SKIP:' "$$tmp" || true)"; \
+	   echo "📊 Summary: $$passed passed, $$failed failed, $$skipped skipped."; \
+	   test "$$failed" -eq 0 )
