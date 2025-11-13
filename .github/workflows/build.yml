@@ -33,9 +33,12 @@ jobs:
         run: |
           mkdir -p dist
           go build -o dist/indexer-linux-amd64 .
+          cp systemd/indexer.service dist/
+          cp systemd/indexer.timer dist/
+          cp systemd/install_indexer.sh dist/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: indexer-linux-amd64
-          path: dist/indexer-linux-amd64
+          path: dist

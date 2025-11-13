@@ -1,0 +1,16 @@
+[Unit]
+Description=Filesystem indexer
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/var/lib/linuxIO
+ExecStartPre=/usr/bin/mkdir -p /var/lib/linuxIO
+ExecStart=/usr/local/bin/indexer index -path / -include-hidden -db-path /var/lib/linuxIO/indexer.db -resume
+Restart=on-failure
+RestartSec=30s
+
+[Install]
+WantedBy=multi-user.target
