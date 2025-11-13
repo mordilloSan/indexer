@@ -9,11 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gtsteffaniak/filebrowser/backend/common/errors"
-	"github.com/gtsteffaniak/filebrowser/backend/common/settings"
-	"github.com/gtsteffaniak/filebrowser/backend/common/utils"
 	"github.com/gtsteffaniak/go-cache/cache"
-	"github.com/gtsteffaniak/go-logger/logger"
+	"github.com/mordillo!san/filebrowser/backend/common/errors"
+	"github.com/mordillo!san/filebrowser/backend/common/utils"
+	"github.com/mordilloSan/go_logger/logger"
 
 	"github.com/mordilloSan/indexer/indexing/iteminfo"
 )
