@@ -75,12 +75,18 @@ test:
 	@( cd "$(BACKEND_DIR)" && \
 	   tmp="$$(mktemp)"; \
 	   trap 'rm -f "$$tmp"' EXIT; \
-	   { $(GO_BIN) test ./... -timeout 5m -count=1 -run . -v 2>&1 | grep -v '\[no test files\]'; } | tee "$$tmp"; \
-	   passed="$$(grep -c '^--- PASS:' "$$tmp" || true)"; \
-	   failed="$$(grep -c '^--- FAIL:' "$$tmp" || true)"; \
-	   skipped="$$(grep -c '^--- SKIP:' "$$tmp" || true)"; \
-	   echo "📊 Summary: $$passed passed, $$failed failed, $$skipped skipped."; \
-	   test "$$failed" -eq 0 )
+	   { $(GO_BIN) test ./... -timeout 5m -count=1 -v 2>&1 \
+	       | tee "$$tmp" \
+	       | grep -Ev '^(=== RUN|--- PASS:|--- SKIP:)' \
+	       | grep -v '\[no test files\]'; } ; \
+	   passed_pkgs="$$(grep -c '^ok[[:space:]]' "$$tmp" || true)"; \
+	   failed_pkgs="$$(grep -c '^FAIL[[:space:]]' "$$tmp" || true)"; \
+	   passed_tests="$$(grep -c '^--- PASS:' "$$tmp" || true)"; \
+	   failed_tests="$$(grep -c '^--- FAIL:' "$$tmp" || true)"; \
+	   skipped_tests="$$(grep -c '^--- SKIP:' "$$tmp" || true)"; \
+	   echo "📊 Package summary: $$passed_pkgs ok, $$failed_pkgs failed."; \
+	   echo "📊 Test summary: $$passed_tests passed, $$failed_tests failed, $$skipped_tests skipped."; \
+	   test "$$failed_pkgs" -eq 0 )
 
 create-dev:
 	@set -euo pipefail
@@ -89,9 +95,6 @@ create-dev:
 	if git rev-parse "$$tag" >/dev/null 2>&1; then echo "❌ Ref '$$tag' already exists"; exit 1; fi; \
 	echo "🏷  Creating tag '$$tag' at HEAD..."; \
 	git tag "$$tag"; \
-	default_branch="dev/$$tag"; \
-	read -p "Enter branch name [$$default_branch]: " branch; \
-	if [ -z "$$branch" ]; then branch="$$default_branch"; fi; \
 	echo "🌱 Creating branch '$$branch' from tag '$$tag'..."; \
-	git checkout -b "$$branch" "$$tag"; \
+	git checkout -b "dev/$$tag" "$$tag"; \
 	echo "✅ Tag '$$tag' and branch '$$branch' created and checked out."

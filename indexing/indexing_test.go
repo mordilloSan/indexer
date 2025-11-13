@@ -408,6 +408,38 @@ func TestSearch(t *testing.T) {
 	}
 }
 
+func TestSearch_RealFilesystem(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a file with a distinctive name so search can find it reliably.
+	targetName := "linux_indexer_search_test_file.txt"
+	targetPath := filepath.Join(dir, targetName)
+	if err := os.WriteFile(targetPath, []byte("test content"), 0o644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	idx := Initialize("real-fs-test", dir, dir, false)
+	if err := idx.StartIndexing(); err != nil {
+		t.Fatalf("StartIndexing failed: %v", err)
+	}
+
+	results := idx.Search("linux_indexer_search_test_file", false)
+	if len(results) == 0 {
+		t.Fatalf("expected at least one search result for %q, got 0", targetName)
+	}
+
+	found := false
+	for _, r := range results {
+		if r.Name == targetName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected search results to include %q", targetName)
+	}
+}
+
 func TestShouldSkip(t *testing.T) {
 	tests := []struct {
 		name          string
