@@ -1,7 +1,11 @@
 GO_INSTALL_DIR := $(HOME)/.go
 GO_BIN ?= go
-BACKEND_DIR ?= $(CURDIR)
-BIN_DIR ?= $(CURDIR)/bin
+
+# Always treat the project root as the directory containing this makefile,
+# regardless of the shell's current working directory.
+PROJECT_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+BACKEND_DIR ?= $(PROJECT_ROOT)
+BIN_DIR ?= $(PROJECT_ROOT)
 BINARY_NAME ?= indexer
 BINARY := $(BIN_DIR)/$(BINARY_NAME)
 GOLANGCI_LINT_MODULE  := github.com/golangci/golangci-lint/v2/cmd/golangci-lint
@@ -75,17 +79,10 @@ test:
 	@( cd "$(BACKEND_DIR)" && \
 	   tmp="$$(mktemp)"; \
 	   trap 'rm -f "$$tmp"' EXIT; \
-	   { $(GO_BIN) test ./... -timeout 5m -count=1 -v 2>&1 \
-	       | tee "$$tmp" \
-	       | grep -Ev '^(=== RUN|--- PASS:|--- SKIP:)' \
-	       | grep -v '\[no test files\]'; } ; \
+	   { $(GO_BIN) test ./... -timeout 5m -count=1 2>&1 | grep -v '\[no test files\]'; } | tee "$$tmp"; \
 	   passed_pkgs="$$(grep -c '^ok[[:space:]]' "$$tmp" || true)"; \
 	   failed_pkgs="$$(grep -c '^FAIL[[:space:]]' "$$tmp" || true)"; \
-	   passed_tests="$$(grep -c '^--- PASS:' "$$tmp" || true)"; \
-	   failed_tests="$$(grep -c '^--- FAIL:' "$$tmp" || true)"; \
-	   skipped_tests="$$(grep -c '^--- SKIP:' "$$tmp" || true)"; \
 	   echo "📊 Package summary: $$passed_pkgs ok, $$failed_pkgs failed."; \
-	   echo "📊 Test summary: $$passed_tests passed, $$failed_tests failed, $$skipped_tests skipped."; \
 	   test "$$failed_pkgs" -eq 0 )
 
 create-dev:
@@ -95,6 +92,7 @@ create-dev:
 	if git rev-parse "$$tag" >/dev/null 2>&1; then echo "❌ Ref '$$tag' already exists"; exit 1; fi; \
 	echo "🏷  Creating tag '$$tag' at HEAD..."; \
 	git tag "$$tag"; \
+	default_branch="dev/$$tag"; \
 	echo "🌱 Creating branch '$$branch' from tag '$$tag'..."; \
-	git checkout -b "dev/$$tag" "$$tag"; \
+	git checkout -b "$$branch" "$$tag"; \
 	echo "✅ Tag '$$tag' and branch '$$branch' created and checked out."
