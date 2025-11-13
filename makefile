@@ -55,15 +55,10 @@ endif
 	@( cd "$(BACKEND_DIR)" && "$(GOLANGCI_LINT)" run --fix ./... --timeout 3m $(GOLANGCI_LINT_OPTS) )
 	@echo "✅ Go Linting Ok!"
 
-run:
-	@set -euo pipefail
-	@echo "🚀 Running indexer from $(BACKEND_DIR) against / "
-	@( cd "$(BACKEND_DIR)" && $(GO_BIN) run . -path / )
-
 run-verbose:
 	@set -euo pipefail
 	@echo "🚀 Running indexer from $(BACKEND_DIR) against / (verbose)"
-	@( cd "$(BACKEND_DIR)" && $(GO_BIN) run . -path / -verbose )
+	@( cd "$(BACKEND_DIR)" && $(GO_BIN) run . -path / -verbose -include-hidden )
 
 build:
 	@set -euo pipefail

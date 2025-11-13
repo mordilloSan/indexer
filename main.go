@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/mordilloSan/go_logger/logger"
 	"indexer/indexing"
+	"indexer/storage"
 )
 
 func main() {
@@ -63,6 +65,22 @@ func main() {
 	logger.Infof("Total files: %d", index.NumFiles)
 	logger.Infof("Total size: %d bytes (%.2f GB)", index.GetTotalSize(), float64(index.GetTotalSize())/(1024*1024*1024))
 	logger.Infof("Indexing duration: %v", duration)
+
+	db, err := storage.Open("")
+	if err != nil {
+		logger.Errorf("Failed to open database: %v", err)
+		os.Exit(1)
+	}
+	defer func() { _ = db.Close() }()
+
+	saveCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	if err := storage.SaveIndex(saveCtx, db, index); err != nil {
+		logger.Errorf("Failed to persist index: %v", err)
+		os.Exit(1)
+	}
+	logger.Infof("Saved index '%s' to database", index.Name)
 
 	// Perform search if search term provided
 	if *searchTerm != "" {

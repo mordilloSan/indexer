@@ -1,4 +1,4 @@
 *.db
 *.bak
 *.log
-indexer
+indexer*

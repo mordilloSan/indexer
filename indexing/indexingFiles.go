@@ -329,9 +329,11 @@ func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjus
 			ModTime: file.ModTime(),
 			Hidden:  hidden,
 		}
+		itemInfo.Inode = inodeFromFileInfo(file)
 
 		if isDir {
 			dirPath := combinedPath + file.Name()
+			dirMapKey := normalizeIndexPath(dirPath)
 
 			if config.Recursive {
 				// Recursively index the subdirectory
@@ -344,8 +346,9 @@ func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjus
 
 			// Get the size from the indexed directory
 			idx.mu.RLock()
-			if realDirInfo, exists := idx.Directories[dirPath]; exists {
+			if realDirInfo, exists := idx.Directories[dirMapKey]; exists {
 				itemInfo.Size = realDirInfo.Size
+				itemInfo.Inode = realDirInfo.Inode
 			}
 			idx.mu.RUnlock()
 
@@ -392,6 +395,7 @@ func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjus
 		Type:    "directory",
 		Size:    totalSize,
 		ModTime: stat.ModTime(),
+		Inode:   inodeFromFileInfo(stat),
 	}
 	dirFileInfo.SortItems()
 
@@ -783,5 +787,27 @@ func (idx *Index) MakeIndexPath(path string) string {
 	path = strings.TrimPrefix(path, idx.Path)
 	path = idx.MakeIndexPathPlatform(path)
 	path = strings.TrimSuffix(path, "/") + "/"
+	return path
+}
+
+func inodeFromFileInfo(info os.FileInfo) uint64 {
+	if info == nil {
+		return 0
+	}
+	_, _, ino, ok := getFileDetails(info.Sys())
+	if ok {
+		return ino
+	}
+	return 0
+}
+
+func normalizeIndexPath(path string) string {
+	if path == "" || path == "/" {
+		return "/"
+	}
+	path = strings.TrimSuffix(path, "/") + "/"
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
 	return path
 }

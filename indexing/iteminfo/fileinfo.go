@@ -11,6 +11,7 @@ type ItemInfo struct {
 	ModTime time.Time `json:"modified"` // modification time
 	Type    string    `json:"type"`     // "directory" for folders, or basic type for files
 	Hidden  bool      `json:"hidden"`   // whether the file is hidden
+	Inode   uint64    `json:"inode"`    // inode identifier when available
 }
 
 // FileInfo describes a file or directory with its contents
