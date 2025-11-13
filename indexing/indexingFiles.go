@@ -1,10 +1,12 @@
 package indexing
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -23,7 +25,6 @@ var (
 type actionConfig struct {
 	Quick         bool // whether to perform a quick scan (skip unchanged directories)
 	Recursive     bool // whether to recursively index subdirectories
-	CheckViewable bool // whether to check if the path has viewable:true (for API access checks)
 	IsRoutineScan bool // whether this is a routine/scheduled scan (vs initial indexing)
 }
 
@@ -47,6 +48,7 @@ type Index struct {
 	Name                       string                        // unique name for this index
 	Path                       string                        // filesystem path being indexed
 	Source                     string                        // source identifier
+	includeHidden              bool                          // whether to include hidden files and directories
 	Directories                map[string]*iteminfo.FileInfo `json:"-"` // indexed directories
 	DirectoriesLedger          map[string]struct{}           `json:"-"` // set of indexed paths
 	FilesChangedDuringIndexing bool                          `json:"-"` // whether files changed during indexing
@@ -70,12 +72,25 @@ const (
 	UNAVAILABLE IndexStatus = "unavailable"
 )
 
-// omitList contains directory names to skip during indexing
-var omitList = map[string]bool{
-	"$RECYCLE.BIN":              true,
-	"System Volume Information": true,
-	"@eaDir":                    true,
-}
+var (
+	linuxSystemPaths = []string{"/proc", "/dev"}
+	externalFSTypes  = map[string]struct{}{
+		"nfs":        {},
+		"nfs4":       {},
+		"cifs":       {},
+		"smbfs":      {},
+		"smb2":       {},
+		"smb3":       {},
+		"fuse.cifs":  {},
+		"fuse.smb":   {},
+		"fuse.smb3":  {},
+		"fuse.nfs":   {},
+		"fuse.ceph":  {},
+		"fuse.iscsi": {},
+	}
+	externalMountsOnce  sync.Once
+	externalMountPoints map[string]string
+)
 
 func init() {
 	indexes = make(map[string]*Index)
@@ -85,7 +100,8 @@ func init() {
 // name: a unique name for this index
 // path: the filesystem path to index (e.g., "/", "/home", "/home/user/documents")
 // source: an optional source identifier (can be same as name)
-func Initialize(name string, path string, source string) *Index {
+// includeHidden: whether to include hidden files and directories (starting with .)
+func Initialize(name string, path string, source string, includeHidden bool) *Index {
 	indexesMutex.Lock()
 	defer indexesMutex.Unlock()
 
@@ -93,6 +109,7 @@ func Initialize(name string, path string, source string) *Index {
 		Name:              name,
 		Path:              path,
 		Source:            source,
+		includeHidden:     includeHidden,
 		Directories:       make(map[string]*iteminfo.FileInfo),
 		DirectoriesLedger: make(map[string]struct{}),
 		processedInodes:   make(map[uint64]struct{}),
@@ -105,7 +122,7 @@ func Initialize(name string, path string, source string) *Index {
 	}
 	indexes[name] = newIndex
 
-	logger.Infof("initialized index [%s] for path [%s]", name, path)
+	logger.Infof("initialized index [%s] for path [%s] (includeHidden: %v)", name, path, includeHidden)
 	return newIndex
 }
 
@@ -158,7 +175,7 @@ func (idx *Index) indexDirectory(adjustedPath string, config actionConfig) error
 
 	// check if excluded from indexing
 	hidden := isHidden(dirInfo)
-	if idx.shouldSkip(dirInfo.IsDir(), hidden, adjustedPath, dirInfo.Name()) {
+	if idx.shouldSkip(dirInfo.IsDir(), hidden, adjustedPath) {
 		return ErrNotIndexed
 	}
 
@@ -254,9 +271,8 @@ func (idx *Index) GetFsDirInfo(adjustedPath string) (*iteminfo.FileInfo, error) 
 	combinedPath := adjustedPath
 	var response *iteminfo.FileInfo
 	response, err = idx.GetDirInfo(dir, dirInfo, realPath, adjustedPath, combinedPath, actionConfig{
-		Quick:         false,
-		Recursive:     false,
-		CheckViewable: true,
+		Quick:     false,
+		Recursive: false,
 	})
 	if err != nil {
 		return nil, err
@@ -305,7 +321,7 @@ func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjus
 		baseName := file.Name()
 		fullCombined := combinedPath + baseName
 		// Skip items based on simple rules (hidden files, system directories)
-		if idx.shouldSkip(isDir, hidden, fullCombined, baseName) {
+		if idx.shouldSkip(isDir, hidden, fullCombined) {
 			continue
 		}
 		itemInfo := &iteminfo.ItemInfo{
@@ -476,14 +492,21 @@ func isHidden(file os.FileInfo) bool {
 	return false
 }
 
-func (idx *Index) shouldSkip(isDir bool, isHidden bool, fullCombined, baseName string) bool {
+func (idx *Index) shouldSkip(isDir bool, isHidden bool, fullCombined string) bool {
 	if fullCombined == "/" {
 		return false
 	}
 
-	// Skip system directories that should never be indexed
-	if isDir && omitList[baseName] {
-		return true
+	if isDir {
+		// Skip system directories that should never be indexed
+		if runtime.GOOS == "linux" {
+			if idx.isLinuxSystemPath(fullCombined) {
+				return true
+			}
+			if idx.isExternalMount(fullCombined) {
+				return true
+			}
+		}
 	}
 
 	// Optionally skip hidden files and directories
@@ -511,6 +534,210 @@ func (idx *Index) SetStatus(status IndexStatus) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 	idx.Status = status
+}
+
+func (idx *Index) GetTotalSize() uint64 {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	return idx.totalSize
+}
+
+func (idx *Index) isLinuxSystemPath(fullCombined string) bool {
+	realPath := idx.realPathFromCombined(fullCombined)
+	if realPath == "" {
+		return false
+	}
+
+	for _, protectedPath := range linuxSystemPaths {
+		protectedPath = filepath.Clean(protectedPath)
+		if realPath == protectedPath {
+			return true
+		}
+		if strings.HasPrefix(realPath, protectedPath+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (idx *Index) isExternalMount(fullCombined string) bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+
+	realPath := idx.realPathFromCombined(fullCombined)
+	if realPath == "" {
+		return false
+	}
+
+	mounts := getExternalMountPoints()
+	if len(mounts) == 0 {
+		return false
+	}
+
+	path := filepath.Clean(realPath)
+	for mountPoint := range mounts {
+		if mountPoint == "" || mountPoint == "/" {
+			continue
+		}
+		if path == mountPoint || strings.HasPrefix(path, mountPoint+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (idx *Index) realPathFromCombined(fullCombined string) string {
+	base := filepath.Clean(idx.Path)
+	if base == "" {
+		base = "/"
+	}
+
+	cleanCombined := filepath.Clean(fullCombined)
+	if cleanCombined == "/" || cleanCombined == "." {
+		return base
+	}
+
+	relative := strings.TrimPrefix(cleanCombined, "/")
+	return filepath.Join(base, relative)
+}
+
+func getExternalMountPoints() map[string]string {
+	externalMountsOnce.Do(func() {
+		externalMountPoints = loadExternalMountPoints()
+	})
+	if externalMountPoints == nil {
+		return map[string]string{}
+	}
+	return externalMountPoints
+}
+
+func loadExternalMountPoints() map[string]string {
+	mounts := make(map[string]string)
+	if runtime.GOOS != "linux" {
+		return mounts
+	}
+
+	file, err := os.Open("/proc/self/mountinfo")
+	if err != nil {
+		logger.Warnf("unable to read mountinfo: %v", err)
+		return mounts
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		mountPoint, fsType, source, ok := parseMountInfo(scanner.Text())
+		if !ok {
+			continue
+		}
+		if isExternalFilesystem(fsType, source) {
+			mounts[mountPoint] = fsType
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		logger.Warnf("error while scanning mountinfo: %v", err)
+	}
+	return mounts
+}
+
+func parseMountInfo(line string) (mountPoint, fsType, source string, ok bool) {
+	parts := strings.Split(line, " - ")
+	if len(parts) != 2 {
+		return "", "", "", false
+	}
+
+	pre := strings.Fields(parts[0])
+	post := strings.Fields(parts[1])
+	if len(pre) < 5 || len(post) < 2 {
+		return "", "", "", false
+	}
+
+	rawMountPoint := pre[4]
+	mountPoint = decodeMountPath(rawMountPoint)
+	mountPoint = filepath.Clean(mountPoint)
+	fsType = strings.ToLower(post[0])
+	source = strings.ToLower(post[1])
+	return mountPoint, fsType, source, true
+}
+
+func decodeMountPath(raw string) string {
+	decoded := strings.ReplaceAll(raw, "\\040", " ")
+	decoded = strings.ReplaceAll(decoded, "\\011", "\t")
+	decoded = strings.ReplaceAll(decoded, "\\012", "\n")
+	decoded = strings.ReplaceAll(decoded, "\\134", "\\")
+	return decoded
+}
+
+func isExternalFilesystem(fsType, source string) bool {
+	if _, ok := externalFSTypes[fsType]; ok {
+		return true
+	}
+	if strings.Contains(fsType, "iscsi") || strings.Contains(source, "iscsi") {
+		return true
+	}
+	if strings.HasPrefix(source, "//") {
+		return true
+	}
+	return false
+}
+
+// SearchResult represents a search match
+type SearchResult struct {
+	Path  string // full path to the file/folder
+	Name  string // name of the file/folder
+	Size  int64  // size in bytes
+	IsDir bool   // whether it's a directory
+}
+
+// Search finds all files and folders matching the search term
+func (idx *Index) Search(searchTerm string, caseSensitive bool) []SearchResult {
+	searchOpts := iteminfo.SearchOptions{
+		CaseSensitive: caseSensitive,
+		Terms:         []string{searchTerm},
+	}
+
+	results := []SearchResult{}
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	for path, dirInfo := range idx.Directories {
+		// Search in files
+		for _, file := range dirInfo.Files {
+			if file.ContainsSearchTerm(searchTerm, searchOpts) {
+				fullPath := path
+				if !strings.HasSuffix(fullPath, "/") {
+					fullPath += "/"
+				}
+				fullPath += file.Name
+				results = append(results, SearchResult{
+					Path:  fullPath,
+					Name:  file.Name,
+					Size:  file.Size,
+					IsDir: false,
+				})
+			}
+		}
+
+		// Search in folders
+		for _, folder := range dirInfo.Folders {
+			if folder.ContainsSearchTerm(searchTerm, searchOpts) {
+				fullPath := path
+				if !strings.HasSuffix(fullPath, "/") {
+					fullPath += "/"
+				}
+				fullPath += folder.Name
+				results = append(results, SearchResult{
+					Path:  fullPath,
+					Name:  folder.Name,
+					Size:  folder.Size,
+					IsDir: true,
+				})
+			}
+		}
+	}
+
+	return results
 }
 
 func (idx *Index) handleFile(file os.FileInfo, fullCombined string) (size uint64, shouldCountSize bool) {
