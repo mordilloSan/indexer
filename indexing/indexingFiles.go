@@ -21,9 +21,8 @@ var (
 	ErrNotIndexed = errors.New("path not indexed")
 )
 
-// actionConfig holds all configuration options for indexing operations
+// actionConfig holds configuration options for indexing operations
 type actionConfig struct {
-	Quick     bool // whether to perform a quick scan (skip unchanged directories)
 	Recursive bool // whether to recursively index subdirectories
 }
 
@@ -56,7 +55,6 @@ type Index struct {
 	processedInodes            map[uint64]struct{}           `json:"-"` // tracks processed inodes for hardlinks
 	totalSize                  uint64                        `json:"-"` // total size
 	mu                         sync.RWMutex                  `json:"-"` // protects concurrent access
-	quickScan                  bool                          `json:"-"`
 }
 
 var (
@@ -134,8 +132,7 @@ func Initialize(name string, path string, source string, includeHidden bool) *In
 	return newIndex
 }
 
-// ApplySnapshot seeds the index with previously stored directory information
-// so subsequent indexing can perform quick scans against unchanged paths.
+// ApplySnapshot seeds the index with previously stored directory information.
 func (idx *Index) ApplySnapshot(dirs map[string]*iteminfo.FileInfo) {
 	if len(dirs) == 0 {
 		return
@@ -147,7 +144,6 @@ func (idx *Index) ApplySnapshot(dirs map[string]*iteminfo.FileInfo) {
 	for path := range dirs {
 		idx.DirectoriesLedger[path] = struct{}{}
 	}
-	idx.quickScan = true
 }
 
 // RefreshAbsolutePath re-indexes a specific filesystem path (file or directory).
@@ -197,13 +193,7 @@ func (idx *Index) StartIndexing() error {
 	idx.SetStatus(INDEXING)
 	logger.Infof("starting indexing for [%s] at path [%s]", idx.Name, idx.Path)
 
-	idx.mu.Lock()
-	quick := idx.quickScan
-	idx.quickScan = false
-	idx.mu.Unlock()
-
 	config := actionConfig{
-		Quick:     quick,
 		Recursive: true,
 	}
 
@@ -261,34 +251,18 @@ func (idx *Index) indexDirectory(adjustedPath string, config actionConfig) error
 	combinedPath := adjustedPath
 	// get whats currently in cache
 	idx.mu.RLock()
-	cacheDirItems := []iteminfo.ItemInfo{}
 	modChange := false
 	cachedDir, exists := idx.Directories[adjustedPath]
 	if exists {
 		modChange = dirInfo.ModTime() != cachedDir.ModTime
-		cacheDirItems = cachedDir.Folders
 	}
 	idx.mu.RUnlock()
 
-	// If the directory has not been modified since the last index, skip expensive readdir
-	// recursively check cached dirs for mod time changes as well
 	if config.Recursive {
 		if modChange {
 			idx.mu.Lock()
 			idx.FilesChangedDuringIndexing = true
 			idx.mu.Unlock()
-		} else if config.Quick {
-			for _, item := range cacheDirItems {
-				subConfig := actionConfig{
-					Quick:     config.Quick,
-					Recursive: true,
-				}
-				err = idx.indexDirectory(combinedPath+item.Name, subConfig)
-				if err != nil && err != ErrNotIndexed {
-					logger.Errorf("error indexing directory %v : %v", combinedPath+item.Name, err)
-				}
-			}
-			return nil
 		}
 	}
 	dirFileInfo, err2 := idx.GetDirInfo(dir, dirInfo, realPath, adjustedPath, combinedPath, config)
@@ -342,7 +316,6 @@ func (idx *Index) GetFsDirInfo(adjustedPath string) (*iteminfo.FileInfo, error) 
 	combinedPath := adjustedPath
 	var response *iteminfo.FileInfo
 	response, err = idx.GetDirInfo(dir, dirInfo, realPath, adjustedPath, combinedPath, actionConfig{
-		Quick:     false,
 		Recursive: false,
 	})
 	if err != nil {
@@ -519,7 +492,6 @@ func (idx *Index) GetRealPath(relativePath ...string) (string, bool, error) {
 
 func (idx *Index) RefreshFileInfo(opts iteminfo.FileOptions) error {
 	config := actionConfig{
-		Quick:     false,
 		Recursive: opts.Recursive,
 	}
 

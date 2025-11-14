@@ -11,7 +11,6 @@ A proof of concept that a SQlite DB instead of RAM DB can also be fast
 - Recursive indexing of any path with optional hidden-file support.
 - Automatic detection of hard links and de-duplication of disk usage totals.
 - Persistence to SQLite using the [`mattn/go-sqlite3`](https://github.com/mattn/go-sqlite3) driver.
-- Snapshot “resume” mode for quick re-indexing of unchanged trees.
 - Refresh mode for single-file or directory updates (ideal after copy/move/delete operations).
 - Systemd service/timer definitions for scheduled scans.
 - Built-in rate limiter to avoid repeated full scans in short succession.
@@ -49,8 +48,7 @@ indexer index \
   -path /home/miguelmariz \
   -name my_home \
   -include-hidden \
-  -db-path /var/lib/linuxIO/indexer.db \
-  -resume
+  -db-path /var/lib/linuxIO/indexer.db
 ```
 
 Key flags:
@@ -59,7 +57,6 @@ Key flags:
 - `-name`: index name (defaults to sanitized `-path`).
 - `-include-hidden`: include dotfiles/dotdirs.
 - `-db-path`: SQLite file; defaults to `INDEXER_DB_PATH` env or `indexer.db`.
-- `-resume`: preload the last snapshot from SQLite to enable quick scans.
 - `-no-rate-limit`: disable the 30-second rate limiter for full scans.
 
 2. **refresh** – refresh specific paths in an existing index:
@@ -166,6 +163,37 @@ indexer socket \
 - The `-default-index` flag and auto-detection rules match the CLI/API behavior: if `-default-index` is not set and only one index exists, it is used automatically; otherwise an explicit index is required.
 
 Rate limiting prevents `indexer index` full scans from starting more than once every 30 seconds per DB path. If a run happens too soon, the CLI exits with a “retry in …” message.
+
+### Recommended Scheduling & Refresh Strategy
+
+For production, the recommended setup is a single long-lived daemon managed by systemd:
+
+- `indexer.service`  
+  - Runs `indexer daemon` as a root-owned service at boot.  
+  - The daemon performs a full scan of `/` at startup and then on a fixed internal schedule (every 15 minutes by default), writing results to `indexer.db` in `/var/lib/linuxIO`.  
+  - It also maintains an in-process filesystem watcher for high-value paths (by default `/home` and `/var/log`), triggering `refresh`-style updates when changes are observed.
+
+- Additional event-driven refresh (optional)  
+  - You can still hook your own file-watch mechanism (for example, inotify/fanotify, or application-specific hooks) to call:
+
+    ```bash
+    indexer refresh \
+      -name root \
+      -db-path /var/lib/linuxIO/indexer.db \
+      -refresh-path /home \
+      -refresh-recursive
+    ```
+
+  - Typical high-value candidates for event-driven `refresh`:
+    - `/home` (user home directories)
+    - `/var/log` (log files)
+    - `/srv` or application data roots (for example `/var/lib/myapp`, `/srv/projects`)
+    - Any large project or data directory where you care about fresh stats/search results
+
+In this model:
+
+- The `indexer daemon` process provides a clean, authoritative snapshot on a predictable schedule.
+- Event-driven `indexer refresh` calls, either from the built-in watcher or external tooling, keep specific hot paths up to date between full scans.
 
 ## Database Layout & API
 

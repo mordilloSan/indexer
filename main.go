@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/mordilloSan/go_logger/logger"
 
 	"indexer/indexing"
@@ -35,6 +36,8 @@ func main() {
 	switch cmd {
 	case "index":
 		err = runIndexCommand(args)
+	case "daemon":
+		err = runDaemonCommand()
 	case "refresh":
 		err = runRefreshCommand(args)
 	case "search":
@@ -47,6 +50,8 @@ func main() {
 		err = runSizeCommand(args)
 	case "socket":
 		err = runSocketCommand(args)
+	case "watch":
+		err = runWatchCommand(args)
 	case "-h", "--help", "help":
 		printRootUsage()
 		return
@@ -67,12 +72,14 @@ func printRootUsage() {
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  index    Run a full index and persist to SQLite")
+	fmt.Println("  daemon   Run as a long-lived indexing daemon")
 	fmt.Println("  refresh  Refresh specific paths using an existing snapshot")
 	fmt.Println("  search   Search using an existing snapshot (no new scan)")
 	fmt.Println("  serve    Run a simple HTTP API backed by SQLite")
 	fmt.Println("  stats    Show aggregate directory statistics from SQLite")
 	fmt.Println("  size     Show only the total size of a directory from SQLite")
 	fmt.Println("  socket   Run a Unix socket server for fast local queries")
+	fmt.Println("  watch    Watch paths and trigger event-driven refreshes")
 	fmt.Println()
 	fmt.Println("Run 'indexer <command> -h' for command-specific flags.")
 }
@@ -93,7 +100,6 @@ func runIndexCommand(args []string) error {
 	indexName := fs.String("name", "", "Name for this index (optional, defaults to path)")
 	dbPathFlag := fs.String("db-path", "", "Path to the SQLite database file (overrides INDEXER_DB_PATH)")
 	includeHidden := fs.Bool("include-hidden", false, "Include hidden files and directories (starting with .)")
-	resumeFlag := fs.Bool("resume", false, "Reuse the previous database snapshot to speed up re-indexing")
 	verbose := fs.Bool("verbose", false, "Enable verbose logging (DEBUG level)")
 	noRateLimit := fs.Bool("no-rate-limit", false, "Disable rate limiting for this run")
 
@@ -114,57 +120,7 @@ func runIndexCommand(args []string) error {
 	name := deriveIndexName(*indexName, *indexPath)
 	dbPath := deriveDBPath(*dbPathFlag)
 
-	logger.Infof("Initializing indexer for path: %s", *indexPath)
-	idx := indexing.Initialize(name, *indexPath, *indexPath, *includeHidden)
-
-	if *resumeFlag {
-		if err := storage.LoadSnapshotIntoIndex(context.Background(), dbPath, name, idx); err != nil {
-			if !errors.Is(err, storage.ErrSnapshotNotFound) {
-				logger.Warnf("Unable to load previous snapshot: %v", err)
-			} else {
-				logger.Debugf("No previous snapshot found for %s", name)
-			}
-		} else {
-			logger.Infof("Loaded previous snapshot for %s; quick scan enabled", name)
-		}
-	}
-
-	if !*noRateLimit {
-		rateLimiter := newRateLimiter(dbPath)
-		if err := rateLimiter.Enforce(); err != nil {
-			return err
-		}
-	}
-
-	logger.Infof("Starting indexing...")
-	startTime := time.Now()
-	if err := idx.StartIndexing(); err != nil {
-		return fmt.Errorf("indexing: %w", err)
-	}
-	duration := time.Since(startTime)
-
-	logger.Infof("Indexing completed successfully!")
-	logger.Infof("Total directories: %d", idx.NumDirs)
-	logger.Infof("Total files: %d", idx.NumFiles)
-	logger.Infof("Total size: %d bytes (%.2f GB)", idx.GetTotalSize(), float64(idx.GetTotalSize())/(1024*1024*1024))
-	logger.Infof("Indexing duration: %v", duration)
-
-	saveCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
-	metrics := &storage.PersistMetrics{IndexDuration: duration}
-	if err := storage.SaveIndexToFile(saveCtx, dbPath, idx, metrics); err != nil {
-		return fmt.Errorf("persist index: %w", err)
-	}
-
-	logger.Infof(
-		"Saved index '%s' to database (export: %v, vacuum: %v)",
-		idx.Name,
-		metrics.ExportDuration,
-		metrics.VacuumDuration,
-	)
-
-	return nil
+	return indexOnce(*indexPath, name, dbPath, *includeHidden, *noRateLimit)
 }
 
 func runRefreshCommand(args []string) error {
@@ -247,6 +203,222 @@ func runRefreshMode(idx *indexing.Index, indexName, dbPath string, refreshPaths 
 	return nil
 }
 
+func indexOnce(indexPath, name, dbPath string, includeHidden, noRateLimit bool) error {
+	logger.Infof("Initializing indexer for path: %s", indexPath)
+	idx := indexing.Initialize(name, indexPath, indexPath, includeHidden)
+
+	if !noRateLimit {
+		rateLimiter := newRateLimiter(dbPath)
+		if err := rateLimiter.Enforce(); err != nil {
+			return err
+		}
+	}
+
+	logger.Infof("Starting indexing...")
+	startTime := time.Now()
+	if err := idx.StartIndexing(); err != nil {
+		return fmt.Errorf("indexing: %w", err)
+	}
+	duration := time.Since(startTime)
+
+	logger.Infof("Indexing completed successfully!")
+	logger.Infof("Total directories: %d", idx.NumDirs)
+	logger.Infof("Total files: %d", idx.NumFiles)
+	logger.Infof("Total size: %d bytes (%.2f GB)", idx.GetTotalSize(), float64(idx.GetTotalSize())/(1024*1024*1024))
+	logger.Infof("Indexing duration: %v", duration)
+
+	saveCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	metrics := &storage.PersistMetrics{IndexDuration: duration}
+	if err := storage.SaveIndexToFile(saveCtx, dbPath, idx, metrics); err != nil {
+		return fmt.Errorf("persist index: %w", err)
+	}
+
+	logger.Infof(
+		"Saved index '%s' to database (export: %v, vacuum: %v)",
+		idx.Name,
+		metrics.ExportDuration,
+		metrics.VacuumDuration,
+	)
+
+	return nil
+}
+
+func runWatchCommand(args []string) error {
+	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+
+	indexPath := fs.String("path", "", "Root path for this index (must match the original -path)")
+	indexName := fs.String("name", "", "Name of the existing index (required)")
+	dbPathFlag := fs.String("db-path", "", "Path to the SQLite database file (overrides INDEXER_DB_PATH)")
+	recursive := fs.Bool("recursive", true, "Recursively refresh directories on change events")
+	verbose := fs.Bool("verbose", false, "Enable verbose logging (DEBUG level)")
+
+	var watchPaths stringSliceFlag
+	fs.Var(&watchPaths, "watch-path", "Directory to watch for filesystem events (repeatable, required)")
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+
+	initLogger(*verbose)
+
+	if *indexName == "" {
+		fs.Usage()
+		return fmt.Errorf("-name is required")
+	}
+	if len(watchPaths) == 0 {
+		fs.Usage()
+		return fmt.Errorf("at least one -watch-path is required")
+	}
+
+	dbPath := deriveDBPath(*dbPathFlag)
+	rootPath := *indexPath
+	if rootPath == "" {
+		rootPath = "/"
+	}
+
+	idx := indexing.Initialize(*indexName, rootPath, rootPath, false)
+
+	return runWatchMode(idx, *indexName, dbPath, watchPaths, *recursive)
+}
+
+func runWatchMode(idx *indexing.Index, indexName, dbPath string, watchPaths []string, recursive bool) error {
+	if dbPath == "" {
+		return fmt.Errorf("watch mode requires -db-path or INDEXER_DB_PATH")
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return fmt.Errorf("create watcher: %w", err)
+	}
+	defer func() { _ = watcher.Close() }()
+
+	addWatch := func(path string) {
+		if err := watcher.Add(path); err != nil {
+			logger.Warnf("watch: unable to watch %s: %v", path, err)
+		} else {
+			logger.Debugf("watch: now watching %s", path)
+		}
+	}
+
+	for _, raw := range watchPaths {
+		absPath, err := filepath.Abs(raw)
+		if err != nil {
+			logger.Warnf("watch: unable to resolve %s: %v", raw, err)
+			continue
+		}
+		if recursive {
+			err = filepath.Walk(absPath, func(path string, info os.FileInfo, walkErr error) error {
+				if walkErr != nil {
+					logger.Warnf("watch: walk error on %s: %v", path, walkErr)
+					return nil
+				}
+				if info != nil && info.IsDir() {
+					addWatch(path)
+				}
+				return nil
+			})
+			if err != nil {
+				logger.Warnf("watch: unable to walk %s: %v", absPath, err)
+			}
+		} else {
+			addWatch(absPath)
+		}
+	}
+
+	logger.Infof("watch: started event-driven refresh for index %s on paths: %s", indexName, strings.Join(watchPaths, ", "))
+
+	for {
+		select {
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return nil
+			}
+
+			if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename) == 0 {
+				continue
+			}
+
+			if recursive && event.Op&fsnotify.Create == fsnotify.Create {
+				info, err := os.Stat(event.Name)
+				if err == nil && info.IsDir() {
+					addWatch(event.Name)
+				}
+			}
+
+			target := strings.TrimSpace(event.Name)
+			if target == "" {
+				continue
+			}
+
+			logger.Debugf("watch: filesystem event %s on %s", event.Op.String(), target)
+
+			err := runRefreshMode(idx, indexName, dbPath, []string{target}, recursive)
+			if err != nil {
+				logger.Errorf("watch: refresh for %s failed: %v", target, err)
+			}
+
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return nil
+			}
+			logger.Errorf("watch: error: %v", err)
+		}
+	}
+}
+
+func runDaemonCommand() error {
+	// Daemon mode: long-lived process that periodically runs a full index
+	// and listens for filesystem events on a small set of high-value paths.
+	initLogger(false)
+
+	indexPath := "/"
+	name := deriveIndexName("", indexPath)
+	dbPath := deriveDBPath("")
+
+	watchPaths := []string{"/home", "/var/log"}
+	filtered := make([]string, 0, len(watchPaths))
+	for _, p := range watchPaths {
+		if _, err := os.Stat(p); err == nil {
+			filtered = append(filtered, p)
+		}
+	}
+
+	if len(filtered) > 0 {
+		go func() {
+			idx := indexing.Initialize(name, indexPath, indexPath, false)
+			if err := runWatchMode(idx, name, dbPath, filtered, true); err != nil {
+				logger.Errorf("daemon: watch mode exited: %v", err)
+			}
+		}()
+	}
+
+	// Initial full index at startup
+	if err := indexOnce(indexPath, name, dbPath, false, false); err != nil {
+		logger.Errorf("daemon: initial index failed: %v", err)
+	}
+
+	// Periodic full index (hard-coded schedule)
+	const fullScanInterval = 15 * time.Minute
+	ticker := time.NewTicker(fullScanInterval)
+	defer ticker.Stop()
+
+	logger.Infof("daemon: started (path=%s, index=%s, db=%s, interval=%v)", indexPath, name, dbPath, fullScanInterval)
+
+	for range ticker.C {
+		if err := indexOnce(indexPath, name, dbPath, false, false); err != nil {
+			logger.Errorf("daemon: periodic index failed: %v", err)
+		}
+	}
+
+	return nil
+}
+
 type stringSliceFlag []string
 
 func (s *stringSliceFlag) String() string {
@@ -259,6 +431,10 @@ func (s *stringSliceFlag) Set(value string) error {
 	}
 	*s = append(*s, value)
 	return nil
+}
+
+func (s *stringSliceFlag) Append(value string) {
+	*s = append(*s, value)
 }
 
 func deriveIndexName(flagName, path string) string {
