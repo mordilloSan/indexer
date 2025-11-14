@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/mordilloSan/go_logger/logger"
@@ -17,15 +18,12 @@ import (
 )
 
 var (
-	// ErrNotIndexed is returned when a path is not indexed
 	ErrNotIndexed = errors.New("path not indexed")
 )
 
-// actionConfig holds all configuration options for indexing operations
+// actionConfig holds configuration options for indexing operations
 type actionConfig struct {
-	Quick         bool // whether to perform a quick scan (skip unchanged directories)
-	Recursive     bool // whether to recursively index subdirectories
-	IsRoutineScan bool // whether this is a routine/scheduled scan (vs initial indexing)
+	Recursive bool // whether to recursively index subdirectories
 }
 
 // reduced index is json exposed to the client
@@ -57,7 +55,6 @@ type Index struct {
 	processedInodes            map[uint64]struct{}           `json:"-"` // tracks processed inodes for hardlinks
 	totalSize                  uint64                        `json:"-"` // total size
 	mu                         sync.RWMutex                  `json:"-"` // protects concurrent access
-	quickScan                  bool                          `json:"-"`
 }
 
 var (
@@ -72,6 +69,14 @@ const (
 	INDEXING    IndexStatus = "indexing"
 	UNAVAILABLE IndexStatus = "unavailable"
 )
+
+// SearchResult represents a search match
+type SearchResult struct {
+	Path  string // full path to the file/folder
+	Name  string // name of the file/folder
+	Size  int64  // size in bytes
+	IsDir bool   // whether it's a directory
+}
 
 var (
 	linuxSystemPaths = []string{"/proc", "/dev"}
@@ -127,8 +132,7 @@ func Initialize(name string, path string, source string, includeHidden bool) *In
 	return newIndex
 }
 
-// ApplySnapshot seeds the index with previously stored directory information
-// so subsequent indexing can perform quick scans against unchanged paths.
+// ApplySnapshot seeds the index with previously stored directory information.
 func (idx *Index) ApplySnapshot(dirs map[string]*iteminfo.FileInfo) {
 	if len(dirs) == 0 {
 		return
@@ -140,7 +144,6 @@ func (idx *Index) ApplySnapshot(dirs map[string]*iteminfo.FileInfo) {
 	for path := range dirs {
 		idx.DirectoriesLedger[path] = struct{}{}
 	}
-	idx.quickScan = true
 }
 
 // RefreshAbsolutePath re-indexes a specific filesystem path (file or directory).
@@ -168,7 +171,6 @@ func (idx *Index) RefreshAbsolutePath(absPath string, recursive bool) error {
 			parent := filepath.Dir(target)
 			indexPath = idx.MakeIndexPath(parent)
 			isDir = true
-			target = parent
 		} else {
 			return statErr
 		}
@@ -191,13 +193,7 @@ func (idx *Index) StartIndexing() error {
 	idx.SetStatus(INDEXING)
 	logger.Infof("starting indexing for [%s] at path [%s]", idx.Name, idx.Path)
 
-	idx.mu.Lock()
-	quick := idx.quickScan
-	idx.quickScan = false
-	idx.mu.Unlock()
-
 	config := actionConfig{
-		Quick:     quick,
 		Recursive: true,
 	}
 
@@ -255,34 +251,18 @@ func (idx *Index) indexDirectory(adjustedPath string, config actionConfig) error
 	combinedPath := adjustedPath
 	// get whats currently in cache
 	idx.mu.RLock()
-	cacheDirItems := []iteminfo.ItemInfo{}
 	modChange := false
 	cachedDir, exists := idx.Directories[adjustedPath]
 	if exists {
 		modChange = dirInfo.ModTime() != cachedDir.ModTime
-		cacheDirItems = cachedDir.Folders
 	}
 	idx.mu.RUnlock()
 
-	// If the directory has not been modified since the last index, skip expensive readdir
-	// recursively check cached dirs for mod time changes as well
 	if config.Recursive {
 		if modChange {
 			idx.mu.Lock()
 			idx.FilesChangedDuringIndexing = true
 			idx.mu.Unlock()
-		} else if config.Quick {
-			for _, item := range cacheDirItems {
-				subConfig := actionConfig{
-					Quick:     config.Quick,
-					Recursive: true,
-				}
-				err = idx.indexDirectory(combinedPath+item.Name, subConfig)
-				if err != nil && err != ErrNotIndexed {
-					logger.Errorf("error indexing directory %v : %v", combinedPath+item.Name, err)
-				}
-			}
-			return nil
 		}
 	}
 	dirFileInfo, err2 := idx.GetDirInfo(dir, dirInfo, realPath, adjustedPath, combinedPath, config)
@@ -336,7 +316,6 @@ func (idx *Index) GetFsDirInfo(adjustedPath string) (*iteminfo.FileInfo, error) 
 	combinedPath := adjustedPath
 	var response *iteminfo.FileInfo
 	response, err = idx.GetDirInfo(dir, dirInfo, realPath, adjustedPath, combinedPath, actionConfig{
-		Quick:     false,
 		Recursive: false,
 	})
 	if err != nil {
@@ -513,7 +492,6 @@ func (idx *Index) GetRealPath(relativePath ...string) (string, bool, error) {
 
 func (idx *Index) RefreshFileInfo(opts iteminfo.FileOptions) error {
 	config := actionConfig{
-		Quick:     false,
 		Recursive: opts.Recursive,
 	}
 
@@ -584,11 +562,6 @@ func (idx *Index) shouldSkip(isDir bool, isHidden bool, fullCombined string) boo
 	}
 
 	return false
-}
-
-type DiskUsage struct {
-	Total uint64 `json:"total"`
-	Used  uint64 `json:"used"`
 }
 
 func (idx *Index) SetUsage(totalBytes uint64) {
@@ -749,14 +722,6 @@ func isExternalFilesystem(fsType, source string) bool {
 	return false
 }
 
-// SearchResult represents a search match
-type SearchResult struct {
-	Path  string // full path to the file/folder
-	Name  string // name of the file/folder
-	Size  int64  // size in bytes
-	IsDir bool   // whether it's a directory
-}
-
 // Search finds all files and folders matching the search term
 func (idx *Index) Search(searchTerm string, caseSensitive bool) []SearchResult {
 	searchOpts := iteminfo.SearchOptions{
@@ -850,7 +815,10 @@ func (idx *Index) MakeIndexPath(path string) string {
 		path = strings.TrimPrefix(path, ".")
 	}
 	path = strings.TrimPrefix(path, idx.Path)
-	path = idx.MakeIndexPathPlatform(path)
+	// Normalize to a canonical Linux-style index path:
+	// - ensure a single leading "/"
+	// - ensure a trailing "/" so directories look like "/foo/"
+	path = "/" + strings.TrimPrefix(path, "/")
 	path = strings.TrimSuffix(path, "/") + "/"
 	return path
 }
@@ -875,4 +843,13 @@ func normalizeIndexPath(path string) string {
 		path = "/" + path
 	}
 	return path
+}
+
+func getFileDetails(sys any) (uint64, uint64, uint64, bool) {
+	if stat, ok := sys.(*syscall.Stat_t); ok {
+		// Use allocated size for `du`-like behavior
+		realSize := uint64(stat.Blocks * 512)
+		return realSize, uint64(stat.Nlink), stat.Ino, true
+	}
+	return 0, 1, 0, false
 }

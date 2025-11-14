@@ -427,6 +427,179 @@ func durationMillis(d time.Duration) int64 {
 	return d.Milliseconds()
 }
 
+// ListIndexNames returns all index names stored in the given SQLite database
+// file. The path semantics match other helpers in this package: when empty,
+// the default DB path is used.
+func ListIndexNames(ctx context.Context, path string) ([]string, error) {
+	if path == "" {
+		path = defaultDBPath
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(absPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrSnapshotNotFound
+		}
+		return nil, err
+	}
+
+	dsn := fmt.Sprintf("file:%s?mode=ro&_busy_timeout=%d&_foreign_keys=on", absPath, busyTimeoutMS)
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = db.Close() }()
+
+	return ListIndexNamesFromDB(ctx, db)
+}
+
+// ListIndexNamesFromDB returns all index names using an existing *sql.DB handle.
+func ListIndexNamesFromDB(ctx context.Context, db *sql.DB) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	rows, err := db.QueryContext(ctx, `SELECT name FROM indexes ORDER BY name;`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(names) == 0 {
+		return nil, ErrSnapshotNotFound
+	}
+	return names, nil
+}
+
+// DirStats represents aggregate information about a directory inside an index.
+type DirStats struct {
+	RelativePath string
+	Size         int64
+	ModTime      time.Time
+	NumDirs      int64
+	NumFiles     int64
+}
+
+// GetDirStats returns aggregate size, modification time, and recursive file/dir
+// counts for a given directory path inside an index. The relPath can be any
+// path that was originally indexed under the root (e.g. "/", "/var/log",
+// "/home/user/docs"); it is normalized to the same format used by the
+// indexer when exporting entries.
+func GetDirStats(ctx context.Context, path, name, relPath string) (*DirStats, error) {
+	if path == "" {
+		path = defaultDBPath
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(absPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrSnapshotNotFound
+		}
+		return nil, err
+	}
+
+	dsn := fmt.Sprintf("file:%s?mode=ro&_busy_timeout=%d&_foreign_keys=on", absPath, busyTimeoutMS)
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = db.Close() }()
+
+	return GetDirStatsFromDB(ctx, db, name, relPath)
+}
+
+// GetDirStatsFromDB is like GetDirStats but operates on an existing *sql.DB.
+// This is useful for long-lived processes like HTTP or socket servers.
+func GetDirStatsFromDB(ctx context.Context, db *sql.DB, name, relPath string) (*DirStats, error) {
+	// Normalize to the same representation as indexing.normalizeRelativePath:
+	// - root => "/"
+	// - other paths => leading "/" and no trailing "/"
+	if relPath == "" || relPath == "." || relPath == "/" {
+		relPath = "/"
+	} else {
+		if !strings.HasPrefix(relPath, "/") {
+			relPath = "/" + relPath
+		}
+		relPath = "/" + strings.Trim(relPath, "/")
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var indexID int64
+	scanErr := db.QueryRowContext(ctx, `SELECT id FROM indexes WHERE name = ?`, name).Scan(&indexID)
+	if errors.Is(scanErr, sql.ErrNoRows) {
+		return nil, ErrSnapshotNotFound
+	}
+	if scanErr != nil {
+		return nil, scanErr
+	}
+
+	var size, modUnix int64
+	row := db.QueryRowContext(ctx, `
+		SELECT size, mod_time
+		FROM entries
+		WHERE index_id = ? AND is_dir = 1 AND relative_path = ?;
+	`, indexID, relPath)
+	if err := row.Scan(&size, &modUnix); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrSnapshotNotFound
+		}
+		return nil, err
+	}
+
+	// Count directories and files recursively under this path.
+	var likePrefix string
+	if relPath == "/" {
+		likePrefix = "/%"
+	} else {
+		likePrefix = relPath + "/%"
+	}
+
+	var numDirs, numFiles int64
+	row = db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM entries
+		WHERE index_id = ? AND is_dir = 1 AND relative_path LIKE ? AND relative_path <> ?;
+	`, indexID, likePrefix, relPath)
+	if err := row.Scan(&numDirs); err != nil {
+		return nil, err
+	}
+
+	row = db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM entries
+		WHERE index_id = ? AND is_dir = 0 AND relative_path LIKE ?;
+	`, indexID, likePrefix)
+	if err := row.Scan(&numFiles); err != nil {
+		return nil, err
+	}
+
+	return &DirStats{
+		RelativePath: relPath,
+		Size:         size,
+		ModTime:      time.Unix(modUnix, 0).UTC(),
+		NumDirs:      numDirs,
+		NumFiles:     numFiles,
+	}, nil
+}
+
 func loadSnapshotDirectories(ctx context.Context, path, name string) (map[string]*iteminfo.FileInfo, error) {
 	if path == "" {
 		path = defaultDBPath

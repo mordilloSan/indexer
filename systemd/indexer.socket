@@ -1,0 +1,12 @@
+[Unit]
+Description=Indexer Unix domain socket
+
+[Socket]
+ListenStream=/run/indexer.sock
+SocketMode=0666
+SocketUser=root
+SocketGroup=root
+Service=indexer-socket.service
+
+[Install]
+WantedBy=sockets.target

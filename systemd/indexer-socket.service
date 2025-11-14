@@ -1,0 +1,16 @@
+[Unit]
+Description=Indexer Unix socket server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/var/lib/linuxIO
+ExecStart=/usr/local/bin/indexer socket -db-path /var/lib/linuxIO/indexer.db -default-index root
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target
+

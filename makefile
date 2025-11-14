@@ -1,7 +1,11 @@
 GO_INSTALL_DIR := $(HOME)/.go
 GO_BIN ?= go
-BACKEND_DIR ?= $(CURDIR)
-BIN_DIR ?= $(CURDIR)/bin
+
+# Always treat the project root as the directory containing this makefile,
+# regardless of the shell's current working directory.
+PROJECT_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+BACKEND_DIR ?= $(PROJECT_ROOT)
+BIN_DIR ?= $(PROJECT_ROOT)
 BINARY_NAME ?= indexer
 BINARY := $(BIN_DIR)/$(BINARY_NAME)
 GOLANGCI_LINT_MODULE  := github.com/golangci/golangci-lint/v2/cmd/golangci-lint
@@ -12,7 +16,7 @@ GOLANGCI_LINT_OPTS ?= --modules-download-mode=mod
 .ONESHELL:
 SHELL := /bin/bash
 
-.PHONY: ensure-golint golint run build run-root test
+.PHONY: ensure-golint golint run build run-root test create-dev dev
 
 ensure-golint:
 	@{ set -euo pipefail; \
@@ -55,7 +59,7 @@ endif
 	@( cd "$(BACKEND_DIR)" && "$(GOLANGCI_LINT)" run --fix ./... --timeout 3m $(GOLANGCI_LINT_OPTS) )
 	@echo "✅ Go Linting Ok!"
 
-run-verbose:
+run:
 	@set -euo pipefail
 	@echo "🚀 Running indexer from $(BACKEND_DIR) against / (verbose)"
 	@( cd "$(BACKEND_DIR)" && $(GO_BIN) run . -path / -verbose -include-hidden )
@@ -75,9 +79,20 @@ test:
 	@( cd "$(BACKEND_DIR)" && \
 	   tmp="$$(mktemp)"; \
 	   trap 'rm -f "$$tmp"' EXIT; \
-	   { $(GO_BIN) test ./... -timeout 5m -count=1 -run . -v 2>&1 | grep -v '\[no test files\]'; } | tee "$$tmp"; \
-	   passed="$$(grep -c '^--- PASS:' "$$tmp" || true)"; \
-	   failed="$$(grep -c '^--- FAIL:' "$$tmp" || true)"; \
-	   skipped="$$(grep -c '^--- SKIP:' "$$tmp" || true)"; \
-	   echo "📊 Summary: $$passed passed, $$failed failed, $$skipped skipped."; \
-	   test "$$failed" -eq 0 )
+	   { $(GO_BIN) test ./... -timeout 5m -count=1 2>&1 | grep -v '\[no test files\]'; } | tee "$$tmp"; \
+	   passed_pkgs="$$(grep -c '^ok[[:space:]]' "$$tmp" || true)"; \
+	   failed_pkgs="$$(grep -c '^FAIL[[:space:]]' "$$tmp" || true)"; \
+	   echo "📊 Package summary: $$passed_pkgs ok, $$failed_pkgs failed."; \
+	   test "$$failed_pkgs" -eq 0 )
+
+create-dev:
+	@set -euo pipefail
+	@read -p "Enter new tag name (e.g. v1.2.3): " tag; \
+	if [ -z "$$tag" ]; then echo "❌ Tag name is required"; exit 1; fi; \
+	if git rev-parse "$$tag" >/dev/null 2>&1; then echo "❌ Ref '$$tag' already exists"; exit 1; fi; \
+	echo "🏷  Creating tag '$$tag' at HEAD..."; \
+	git tag "$$tag"; \
+	default_branch="dev/$$tag"; \
+	echo "🌱 Creating branch '$$branch' from tag '$$tag'..."; \
+	git checkout -b "$$branch" "$$tag"; \
+	echo "✅ Tag '$$tag' and branch '$$branch' created and checked out."

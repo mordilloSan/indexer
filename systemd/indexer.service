@@ -1,0 +1,16 @@
+[Unit]
+Description=Filesystem indexer daemon
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/var/lib/linuxIO
+ExecStartPre=/usr/bin/mkdir -p /var/lib/linuxIO
+ExecStart=/usr/local/bin/indexer daemon
+Restart=on-failure
+RestartSec=30s
+
+[Install]
+WantedBy=multi-user.target
