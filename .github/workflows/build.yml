@@ -35,6 +35,8 @@ jobs:
           go build -o dist/indexer-linux-amd64 .
           cp systemd/indexer.service dist/
           cp systemd/indexer.timer dist/
+          cp systemd/indexer-socket.service dist/
+          cp systemd/indexer.socket dist/
           cp systemd/install_indexer.sh dist/
 
       - name: Upload artifact
