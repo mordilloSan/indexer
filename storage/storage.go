@@ -427,9 +427,9 @@ func durationMillis(d time.Duration) int64 {
 	return d.Milliseconds()
 }
 
-// ListIndexNames returns all index names stored in the given SQLite database.
-// The path semantics match other helpers in this package: when empty, the
-// default DB path is used.
+// ListIndexNames returns all index names stored in the given SQLite database
+// file. The path semantics match other helpers in this package: when empty,
+// the default DB path is used.
 func ListIndexNames(ctx context.Context, path string) ([]string, error) {
 	if path == "" {
 		path = defaultDBPath
@@ -452,6 +452,11 @@ func ListIndexNames(ctx context.Context, path string) ([]string, error) {
 	}
 	defer func() { _ = db.Close() }()
 
+	return ListIndexNamesFromDB(ctx, db)
+}
+
+// ListIndexNamesFromDB returns all index names using an existing *sql.DB handle.
+func ListIndexNamesFromDB(ctx context.Context, db *sql.DB) ([]string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -494,18 +499,6 @@ type DirStats struct {
 // "/home/user/docs"); it is normalized to the same format used by the
 // indexer when exporting entries.
 func GetDirStats(ctx context.Context, path, name, relPath string) (*DirStats, error) {
-	// Normalize to the same representation as indexing.normalizeRelativePath:
-	// - root => "/"
-	// - other paths => leading "/" and no trailing "/"
-	if relPath == "" || relPath == "." || relPath == "/" {
-		relPath = "/"
-	} else {
-		if !strings.HasPrefix(relPath, "/") {
-			relPath = "/" + relPath
-		}
-		relPath = "/" + strings.Trim(relPath, "/")
-	}
-
 	if path == "" {
 		path = defaultDBPath
 	}
@@ -526,6 +519,24 @@ func GetDirStats(ctx context.Context, path, name, relPath string) (*DirStats, er
 		return nil, err
 	}
 	defer func() { _ = db.Close() }()
+
+	return GetDirStatsFromDB(ctx, db, name, relPath)
+}
+
+// GetDirStatsFromDB is like GetDirStats but operates on an existing *sql.DB.
+// This is useful for long-lived processes like HTTP or socket servers.
+func GetDirStatsFromDB(ctx context.Context, db *sql.DB, name, relPath string) (*DirStats, error) {
+	// Normalize to the same representation as indexing.normalizeRelativePath:
+	// - root => "/"
+	// - other paths => leading "/" and no trailing "/"
+	if relPath == "" || relPath == "." || relPath == "/" {
+		relPath = "/"
+	} else {
+		if !strings.HasPrefix(relPath, "/") {
+			relPath = "/" + relPath
+		}
+		relPath = "/" + strings.Trim(relPath, "/")
+	}
 
 	if ctx == nil {
 		ctx = context.Background()

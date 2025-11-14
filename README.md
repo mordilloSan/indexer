@@ -2,7 +2,9 @@
 
 Indexer is a Go-based filesystem crawler that snapshots directory trees into a SQLite database. It is designed to power LinuxIO, storing both directories and files (with inode metadata) so the UI and other services can answer questions such as “How big is `/home`?” or “List files under `/var/log`” directly from SQLite without repeated disk scans. The implementation is Linux-only by design.
 
-This code is inspired by the code in Filebrowser Quantum - https://github.com/gtsteffaniak/filebrowser
+This code is inspired by the code in Filebrowser Quantum - https://github.com/gtsteffaniak/filebrowser.
+
+A proof of concept that a SQlite DB instead of RAM DB can also be fast
 
 ## Features
 
@@ -97,7 +99,7 @@ indexer search \
 ```bash
 indexer serve \
   -db-path /var/lib/linuxIO/indexer.db \
-  -addr :8080 \
+  -addr :10210 \
   -default-index my_home
 ```
 
@@ -107,6 +109,19 @@ Endpoints (read-only, JSON, no external libraries):
 - `GET /search?q=<term>&name=<index>&caseSensitive=true|false` – search an index using the same semantics as the CLI `search` command. If `name` is omitted, `-default-index` is used, or a single index is auto-detected.
 - `GET /stats?path=<dir>&name=<index>` – return aggregate directory statistics (size, recursive file/dir counts, last modified) for a given path. If `name` is omitted, `-default-index` is used, or a single index is auto-detected.
 - `GET /size?path=<dir>&name=<index>` – return only the total size (bytes) for a directory inside the index. If `name` is omitted, `-default-index` is used (or a single index is auto-detected).
+
+Example HTTP calls:
+
+```bash
+# Folder size
+curl 'http://localhost:10210/size?path=/home'
+
+# Folder stats (size + counts + mod time)
+curl 'http://localhost:10210/stats?path=/home'
+
+# Search
+curl 'http://localhost:10210/search?q=cockpit'
+```
 
 5. **stats** – aggregate directory statistics (fast, DB-only):
 
@@ -133,6 +148,22 @@ indexer size /home /tmp /var/log
 
 - Uses the default index when only one exists in the DB (otherwise `-name` is required).
 - For a single path, prints just the directory size in bytes. For multiple paths, prints one line per path as `<normalized-path> <size-bytes>`. All sizes are pre-aggregated during indexing.
+
+7. **socket** – Unix socket server (fast, local IPC):
+
+```bash
+indexer socket \
+  -db-path /var/lib/linuxIO/indexer.db \
+  -socket /run/indexer.sock \
+  -default-index my_home
+```
+
+- Opens the SQLite database once and keeps it open for the lifetime of the process.
+- Listens on the given Unix socket path (or a systemd-activated socket) and accepts simple line-based commands:
+  - `SIZE <path>` → responds with `<normalized-path> <size-bytes>`.
+  - `STATS <path>` → responds with a single JSON object containing the same fields as the `stats` command.
+  - `SEARCH <term>` → responds with a JSON array of search results, using the same semantics as the CLI/API `search` command (case-insensitive by default).
+- The `-default-index` flag and auto-detection rules match the CLI/API behavior: if `-default-index` is not set and only one index exists, it is used automatically; otherwise an explicit index is required.
 
 Rate limiting prevents `indexer index` full scans from starting more than once every 30 seconds per DB path. If a run happens too soon, the CLI exits with a “retry in …” message.
 

@@ -175,7 +175,6 @@ func (idx *Index) RefreshAbsolutePath(absPath string, recursive bool) error {
 			parent := filepath.Dir(target)
 			indexPath = idx.MakeIndexPath(parent)
 			isDir = true
-			target = parent
 		} else {
 			return statErr
 		}

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,6 +17,7 @@ import (
 	"time"
 
 	"github.com/mordilloSan/go_logger/logger"
+
 	"indexer/indexing"
 	"indexer/storage"
 )
@@ -41,6 +45,8 @@ func main() {
 		err = runStatsCommand(args)
 	case "size":
 		err = runSizeCommand(args)
+	case "socket":
+		err = runSocketCommand(args)
 	case "-h", "--help", "help":
 		printRootUsage()
 		return
@@ -66,8 +72,17 @@ func printRootUsage() {
 	fmt.Println("  serve    Run a simple HTTP API backed by SQLite")
 	fmt.Println("  stats    Show aggregate directory statistics from SQLite")
 	fmt.Println("  size     Show only the total size of a directory from SQLite")
+	fmt.Println("  socket   Run a Unix socket server for fast local queries")
 	fmt.Println()
 	fmt.Println("Run 'indexer <command> -h' for command-specific flags.")
+}
+
+func initLogger(verbose bool) {
+	mode := os.Getenv("INDEXER_ENV")
+	if mode == "" {
+		mode = "production"
+	}
+	logger.Init(mode, verbose)
 }
 
 func runIndexCommand(args []string) error {
@@ -89,7 +104,7 @@ func runIndexCommand(args []string) error {
 		return err
 	}
 
-	logger.Init("development", *verbose)
+	initLogger(*verbose)
 
 	if *indexPath == "" {
 		fs.Usage()
@@ -172,7 +187,7 @@ func runRefreshCommand(args []string) error {
 		return err
 	}
 
-	logger.Init("development", *verbose)
+	initLogger(*verbose)
 
 	if *indexName == "" {
 		fs.Usage()
@@ -287,7 +302,7 @@ func runSearchCommand(args []string) error {
 		return err
 	}
 
-	logger.Init("development", *verbose)
+	initLogger(*verbose)
 
 	// Allow a positional search term:
 	//   indexer search cockpit
@@ -367,7 +382,7 @@ func runServeCommand(args []string) error {
 	fs.SetOutput(os.Stderr)
 
 	dbPathFlag := fs.String("db-path", "", "Path to the SQLite database file (overrides INDEXER_DB_PATH)")
-	addr := fs.String("addr", ":8080", "HTTP listen address")
+	addr := fs.String("addr", ":10210", "HTTP listen address")
 	defaultIndex := fs.String("default-index", "", "Default index name to use when none is specified in queries")
 	verbose := fs.Bool("verbose", false, "Enable verbose logging (DEBUG level)")
 
@@ -378,12 +393,18 @@ func runServeCommand(args []string) error {
 		return err
 	}
 
-	logger.Init("development", *verbose)
+	initLogger(*verbose)
 
 	dbPath := deriveDBPath(*dbPathFlag)
 	if dbPath == "" {
 		return fmt.Errorf("db path is required")
 	}
+
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("open db: %w", err)
+	}
+	defer func() { _ = db.Close() }()
 
 	mux := http.NewServeMux()
 
@@ -404,7 +425,7 @@ func runServeCommand(args []string) error {
 			if *defaultIndex != "" {
 				name = *defaultIndex
 			} else {
-				names, err := storage.ListIndexNames(r.Context(), dbPath)
+				names, err := storage.ListIndexNamesFromDB(r.Context(), db)
 				if err != nil {
 					status := http.StatusInternalServerError
 					if errors.Is(err, storage.ErrSnapshotNotFound) {
@@ -476,7 +497,7 @@ func runServeCommand(args []string) error {
 			}
 		}
 
-		stats, err := storage.GetDirStats(r.Context(), dbPath, name, qPath)
+		stats, err := storage.GetDirStatsFromDB(r.Context(), db, name, qPath)
 		if err != nil {
 			status := http.StatusInternalServerError
 			if errors.Is(err, storage.ErrSnapshotNotFound) {
@@ -525,7 +546,7 @@ func runServeCommand(args []string) error {
 			}
 		}
 
-		stats, err := storage.GetDirStats(r.Context(), dbPath, name, qPath)
+		stats, err := storage.GetDirStatsFromDB(r.Context(), db, name, qPath)
 		if err != nil {
 			status := http.StatusInternalServerError
 			if errors.Is(err, storage.ErrSnapshotNotFound) {
@@ -557,6 +578,253 @@ func runServeCommand(args []string) error {
 	return http.ListenAndServe(*addr, mux)
 }
 
+func runSocketCommand(args []string) error {
+	fs := flag.NewFlagSet("socket", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+
+	dbPathFlag := fs.String("db-path", "", "Path to the SQLite database file (overrides INDEXER_DB_PATH)")
+	socketPath := fs.String("socket", "/run/indexer.sock", "Unix socket path to listen on (ignored when started by systemd socket activation)")
+	defaultIndex := fs.String("default-index", "", "Default index name to use when none is specified")
+	verbose := fs.Bool("verbose", false, "Enable verbose logging (DEBUG level)")
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+
+	logger.Init("production", *verbose)
+
+	dbPath := deriveDBPath(*dbPathFlag)
+	if dbPath == "" {
+		return fmt.Errorf("db path is required")
+	}
+
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("open db: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ln, usedSystemd, err := listenUnixOrSystemd(*socketPath)
+	if err != nil {
+		return fmt.Errorf("listen on socket: %w", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	if usedSystemd {
+		logger.Infof("Starting Unix socket server via systemd activation (db=%s)", dbPath)
+	} else {
+		logger.Infof("Starting Unix socket server on %s (db=%s)", *socketPath, dbPath)
+	}
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			logger.Errorf("accept error: %v", err)
+			continue
+		}
+		go handleSocketConn(conn, db, dbPath, *defaultIndex)
+	}
+}
+
+func listenUnixOrSystemd(path string) (net.Listener, bool, error) {
+	// systemd socket activation: LISTEN_FDS >= 1, LISTEN_PID == our pid.
+	if fdsStr := os.Getenv("LISTEN_FDS"); fdsStr != "" {
+		fds, err := strconv.Atoi(fdsStr)
+		if err == nil && fds > 0 {
+			if pidStr := os.Getenv("LISTEN_PID"); pidStr != "" {
+				if pid, err2 := strconv.Atoi(pidStr); err2 == nil && pid == os.Getpid() {
+					// First socket is fd 3.
+					f := os.NewFile(uintptr(3), "systemd-unix-socket")
+					ln, err := net.FileListener(f)
+					if err != nil {
+						return nil, false, err
+					}
+					return ln, true, nil
+				}
+			}
+		}
+	}
+
+	// Fallback: manage our own Unix socket path.
+	_ = os.Remove(path)
+	ln, err := net.Listen("unix", path)
+	return ln, false, err
+}
+
+func handleSocketConn(conn net.Conn, db *sql.DB, dbPath string, defaultIndex string) {
+	defer func() { _ = conn.Close() }()
+
+	reader := bufio.NewScanner(conn)
+	for reader.Scan() {
+		line := strings.TrimSpace(reader.Text())
+		if line == "" {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+
+		cmd := strings.ToUpper(fields[0])
+		args := fields[1:]
+
+		switch cmd {
+		case "SIZE":
+			handleSocketSize(conn, db, defaultIndex, args)
+		case "STATS":
+			handleSocketStats(conn, db, defaultIndex, args)
+		case "SEARCH":
+			handleSocketSearch(conn, db, dbPath, defaultIndex, args)
+		default:
+			if _, err := fmt.Fprintf(conn, "ERR unknown command: %s\n", cmd); err != nil {
+				logger.Errorf("socket write error: %v", err)
+				return
+			}
+		}
+	}
+}
+
+func effectiveIndexNameFromDB(ctx context.Context, db *sql.DB, defaultIndex string) (string, error) {
+	if defaultIndex != "" {
+		return defaultIndex, nil
+	}
+
+	names, err := storage.ListIndexNamesFromDB(ctx, db)
+	if err != nil {
+		return "", err
+	}
+	if len(names) == 1 {
+		return names[0], nil
+	}
+	if len(names) == 0 {
+		return "", storage.ErrSnapshotNotFound
+	}
+	return "", fmt.Errorf("multiple indexes exist; specify an explicit index")
+}
+
+func handleSocketSize(conn net.Conn, db *sql.DB, defaultIndex string, args []string) {
+	if len(args) == 0 {
+		if _, err := fmt.Fprintln(conn, "ERR SIZE requires a path"); err != nil {
+			logger.Errorf("socket write error: %v", err)
+		}
+		return
+	}
+	path := args[0]
+
+	ctx := context.Background()
+	name, err := effectiveIndexNameFromDB(ctx, db, defaultIndex)
+	if err != nil {
+		if _, werr := fmt.Fprintf(conn, "ERR %v\n", err); werr != nil {
+			logger.Errorf("socket write error: %v", werr)
+		}
+		return
+	}
+
+	stats, err := storage.GetDirStatsFromDB(ctx, db, name, path)
+	if err != nil {
+		if _, werr := fmt.Fprintf(conn, "ERR %v\n", err); werr != nil {
+			logger.Errorf("socket write error: %v", werr)
+		}
+		return
+	}
+
+	if _, err := fmt.Fprintf(conn, "%s %d\n", stats.RelativePath, stats.Size); err != nil {
+		logger.Errorf("socket write error: %v", err)
+	}
+}
+
+func handleSocketStats(conn net.Conn, db *sql.DB, defaultIndex string, args []string) {
+	if len(args) == 0 {
+		if _, err := fmt.Fprintln(conn, "ERR STATS requires a path"); err != nil {
+			logger.Errorf("socket write error: %v", err)
+		}
+		return
+	}
+	path := args[0]
+
+	ctx := context.Background()
+	name, err := effectiveIndexNameFromDB(ctx, db, defaultIndex)
+	if err != nil {
+		if _, werr := fmt.Fprintf(conn, "ERR %v\n", err); werr != nil {
+			logger.Errorf("socket write error: %v", werr)
+		}
+		return
+	}
+
+	stats, err := storage.GetDirStatsFromDB(ctx, db, name, path)
+	if err != nil {
+		if _, werr := fmt.Fprintf(conn, "ERR %v\n", err); werr != nil {
+			logger.Errorf("socket write error: %v", werr)
+		}
+		return
+	}
+
+	type jsonStats struct {
+		Path     string    `json:"path"`
+		Size     int64     `json:"size"`
+		NumDirs  int64     `json:"numDirs"`
+		NumFiles int64     `json:"numFiles"`
+		ModTime  time.Time `json:"modTime"`
+	}
+	out := jsonStats{
+		Path:     stats.RelativePath,
+		Size:     stats.Size,
+		NumDirs:  stats.NumDirs,
+		NumFiles: stats.NumFiles,
+		ModTime:  stats.ModTime,
+	}
+
+	enc := json.NewEncoder(conn)
+	if err := enc.Encode(out); err != nil {
+		if _, werr := fmt.Fprintf(conn, "ERR encode: %v\n", err); werr != nil {
+			logger.Errorf("socket write error: %v", werr)
+		}
+		return
+	}
+}
+
+func handleSocketSearch(conn net.Conn, db *sql.DB, dbPath string, defaultIndex string, args []string) {
+	if len(args) == 0 {
+		if _, err := fmt.Fprintln(conn, "ERR SEARCH requires a term"); err != nil {
+			logger.Errorf("socket write error: %v", err)
+		}
+		return
+	}
+	term := args[0]
+
+	ctx := context.Background()
+	name, err := effectiveIndexNameFromDB(ctx, db, defaultIndex)
+	if err != nil {
+		if _, werr := fmt.Fprintf(conn, "ERR %v\n", err); werr != nil {
+			logger.Errorf("socket write error: %v", werr)
+		}
+		return
+	}
+
+	// Use the existing snapshot-loading path (opens its own read-only handle).
+	idx := indexing.Initialize(name, "/", "/", false)
+	if err := storage.LoadSnapshotIntoIndex(ctx, dbPath, name, idx); err != nil {
+		if _, werr := fmt.Fprintf(conn, "ERR %v\n", err); werr != nil {
+			logger.Errorf("socket write error: %v", werr)
+		}
+		return
+	}
+
+	results := idx.Search(term, false)
+
+	enc := json.NewEncoder(conn)
+	if err := enc.Encode(results); err != nil {
+		if _, werr := fmt.Fprintf(conn, "ERR encode: %v\n", err); werr != nil {
+			logger.Errorf("socket write error: %v", werr)
+		}
+		return
+	}
+}
+
 func runStatsCommand(args []string) error {
 	fs := flag.NewFlagSet("stats", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -574,7 +842,7 @@ func runStatsCommand(args []string) error {
 		return err
 	}
 
-	logger.Init("development", *verbose)
+	initLogger(*verbose)
 
 	if *path == "" {
 		// Allow positional path: `indexer stats /var/log`
@@ -659,7 +927,7 @@ func runSizeCommand(args []string) error {
 		return err
 	}
 
-	logger.Init("development", *verbose)
+	initLogger(*verbose)
 
 	// Collect all target paths: optional -path plus any positional arguments.
 	paths := []string{}

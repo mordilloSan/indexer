@@ -16,7 +16,7 @@ GOLANGCI_LINT_OPTS ?= --modules-download-mode=mod
 .ONESHELL:
 SHELL := /bin/bash
 
-.PHONY: ensure-golint golint run build run-root test create-dev
+.PHONY: ensure-golint golint run build run-root test create-dev dev
 
 ensure-golint:
 	@{ set -euo pipefail; \
@@ -59,7 +59,7 @@ endif
 	@( cd "$(BACKEND_DIR)" && "$(GOLANGCI_LINT)" run --fix ./... --timeout 3m $(GOLANGCI_LINT_OPTS) )
 	@echo "✅ Go Linting Ok!"
 
-run-verbose:
+run:
 	@set -euo pipefail
 	@echo "🚀 Running indexer from $(BACKEND_DIR) against / (verbose)"
 	@( cd "$(BACKEND_DIR)" && $(GO_BIN) run . -path / -verbose -include-hidden )
