@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/mordilloSan/go_logger/logger"
 
@@ -21,12 +22,12 @@ func main() {
 		dbPath          = flag.String("db-path", "", "SQLite database path (overrides INDEXER_DB_PATH)")
 		socketPath      = flag.String("socket-path", "/var/run/indexer.sock", "Unix socket path")
 		listenAddr      = flag.String("listen", "", "Optional TCP address (e.g., :8080)")
-		reindexInterval = flag.Duration("interval", 0, "Auto-reindex interval (e.g., 6h), 0=disabled")
+		reindexInterval = flag.String("interval", "1h", "Auto-reindex interval (Go duration like 6h, 30m); 0 disables")
 		verbose         = flag.Bool("verbose", false, "Enable verbose logging")
 	)
 	flag.Parse()
 
-	logger.Init("development", *verbose)
+	logger.Init("production", *verbose)
 
 	if *indexPath == "" {
 		logger.Errorf("Error: -path flag is required")
@@ -34,14 +35,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	nameVal := sanitizeName(*indexName, *indexPath)
+	dbVal := coalesce(*dbPath, os.Getenv("INDEXER_DB_PATH"), "/tmp/indexer.db")
+	socketVal := coalesce(*socketPath, "/var/run/indexer.sock")
+	listenVal := *listenAddr
+
+	interval := time.Duration(0)
+	if parsed, err := time.ParseDuration(*reindexInterval); err != nil {
+		logger.Warnf("Invalid interval %q, defaulting to 0 (disabled): %v", *reindexInterval, err)
+	} else {
+		interval = parsed
+	}
+
 	cfg := cmd.DaemonConfig{
-		IndexName:     sanitizeName(*indexName, *indexPath),
+		IndexName:     nameVal,
 		IndexPath:     *indexPath,
 		IncludeHidden: *includeHidden,
-		DBPath:        coalesce(*dbPath, os.Getenv("INDEXER_DB_PATH"), "/tmp/indexer.db"),
-		SocketPath:    *socketPath,
-		ListenAddr:    *listenAddr,
-		Interval:      *reindexInterval,
+		DBPath:        dbVal,
+		SocketPath:    socketVal,
+		ListenAddr:    listenVal,
+		Interval:      interval,
 	}
 
 	d, err := cmd.NewDaemon(cfg)
@@ -52,8 +65,31 @@ func main() {
 
 	// Log startup configuration
 	logger.Infof("Starting indexer daemon")
+	logger.Infof("Index path: %s", cfg.IndexPath)
+	if *indexName == "" {
+		logger.Infof("Index name: %s (sanitized from path)", cfg.IndexName)
+	} else {
+		logger.Infof("Index name: %s", cfg.IndexName)
+	}
+	if *dbPath == "" && os.Getenv("INDEXER_DB_PATH") == "" {
+		logger.Warnf("DB path not set; defaulting to %s", cfg.DBPath)
+	} else {
+		logger.Infof("DB path: %s", cfg.DBPath)
+	}
+	if *socketPath == "" {
+		logger.Warnf("Socket path empty; defaulting to %s", cfg.SocketPath)
+	} else {
+		logger.Infof("Socket path: %s", cfg.SocketPath)
+	}
+	if cfg.ListenAddr == "" {
+		logger.Infof("TCP listener: disabled")
+	} else {
+		logger.Infof("TCP listener: %s", cfg.ListenAddr)
+	}
 	if cfg.Interval > 0 {
 		logger.Infof("Auto-reindex: every %v", cfg.Interval)
+	} else {
+		logger.Infof("Auto-reindex: disabled")
 	}
 	if cfg.IncludeHidden {
 		logger.Infof("Including hidden files")

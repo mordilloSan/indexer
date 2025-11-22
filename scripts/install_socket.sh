@@ -52,6 +52,10 @@ echo -e "${YELLOW}[3/5]${NC} Installing systemd files..."
 cp systemd/indexer.service /etc/systemd/system/
 echo -e "${GREEN}✓${NC} Systemd files installed"
 
+# Ensure data directory exists for persistent DB
+mkdir -p /var/lib/indexer
+chmod 0755 /var/lib/indexer
+
 # Optional: seed /etc/default/indexer if missing
 if [ ! -f /etc/default/indexer ]; then
     echo -e "${YELLOW}Creating /etc/default/indexer with defaults...${NC}"
