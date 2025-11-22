@@ -57,9 +57,16 @@ func NewDaemon(cfg DaemonConfig) (*daemon, error) {
 		cfg.DBPath = "/var/run/indexer.db"
 	}
 
+	dbExisted := fileExists(cfg.DBPath)
 	db, err := storage.Open(cfg.DBPath)
 	if err != nil {
 		return nil, err
+	}
+	if dbExisted {
+		logger.Infof("Database exists at %s; reusing existing indexes", cfg.DBPath)
+		logLatestIndexStatus(db)
+	} else {
+		logger.Infof("Database not found; creating new at %s", cfg.DBPath)
 	}
 
 	return &daemon{
@@ -339,10 +346,10 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var stats struct {
 		Status      string `json:"status"`
-		NumDirs     int64  `json:"num_dirs,omitempty"`
-		NumFiles    int64  `json:"num_files,omitempty"`
-		TotalSize   int64  `json:"total_size,omitempty"`
-		LastIndexed string `json:"last_indexed,omitempty"`
+		NumDirs     int64  `json:"num_dirs"`
+		NumFiles    int64  `json:"num_files"`
+		TotalSize   int64  `json:"total_size"`
+		LastIndexed string `json:"last_indexed"`
 	}
 	if d.running.Load() {
 		stats.Status = "running"
@@ -565,6 +572,58 @@ func normalizeRelativePath(p string) string {
 func serveOpenapi(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(openapiSpec))
+}
+
+func fileExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func logLatestIndexStatus(db *sql.DB) {
+	var name sql.NullString
+	var lastIndexed sql.NullInt64
+	var numDirs, numFiles sql.NullInt64
+	err := db.QueryRow(`
+		SELECT name, last_indexed, num_dirs, num_files
+		FROM indexes
+		ORDER BY last_indexed DESC
+		LIMIT 1;
+	`).Scan(&name, &lastIndexed, &numDirs, &numFiles)
+
+	switch err {
+	case nil:
+		last := "unknown"
+		if lastIndexed.Valid && lastIndexed.Int64 > 0 {
+			last = time.Unix(lastIndexed.Int64, 0).UTC().Format(time.RFC3339)
+		}
+		logger.Infof("Latest index: name=%s last_indexed=%s dirs=%d files=%d",
+			nullStringOr(name, "<none>"),
+			last,
+			nullInt64Or(numDirs, 0),
+			nullInt64Or(numFiles, 0),
+		)
+	case sql.ErrNoRows:
+		logger.Infof("No prior index metadata found in database")
+	default:
+		logger.Warnf("Could not load latest index metadata: %v", err)
+	}
+}
+
+func nullStringOr(v sql.NullString, def string) string {
+	if v.Valid {
+		return v.String
+	}
+	return def
+}
+
+func nullInt64Or(v sql.NullInt64, def int64) int64 {
+	if v.Valid {
+		return v.Int64
+	}
+	return def
 }
 
 const openapiSpec = `{

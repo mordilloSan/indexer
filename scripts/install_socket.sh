@@ -3,13 +3,6 @@
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-BINARY_PATH="$PROJECT_ROOT/indexer"
-SERVICE_FILE="$PROJECT_ROOT/systemd/indexer.service"
-
-cd "$PROJECT_ROOT"
-
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -25,28 +18,38 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# Step 1: Build the binary
-echo -e "${YELLOW}[1/5]${NC} Building indexer binary..."
-if [ -f "$BINARY_PATH" ]; then
-    echo "Binary already exists at $BINARY_PATH"
-else
-    (cd "$PROJECT_ROOT" && make build) || (cd "$PROJECT_ROOT" && go build -o "$BINARY_PATH")
+# Ensure Go is on PATH (sudo often drops user PATH)
+PATH="/usr/local/go/bin:$PATH"
+GO_BIN="${GO_BIN:-$(command -v go || true)}"
+if [ -z "$GO_BIN" ] && [ -x "/usr/local/go/bin/go" ]; then
+    GO_BIN="/usr/local/go/bin/go"
 fi
-
-if [ ! -f "$BINARY_PATH" ]; then
-    echo -e "${RED}Error: Failed to build binary${NC}"
+if [ -z "$GO_BIN" ]; then
+    echo -e "${RED}Error: Go toolchain not found. Install Go or set GO_BIN to the go binary.${NC}"
     exit 1
 fi
 
+# Stop/disable any existing service to avoid conflicts during install
+if systemctl list-unit-files | grep -q '^indexer.service'; then
+    echo -e "${YELLOW}Stopping existing indexer.service (if running)...${NC}"
+    systemctl stop indexer.service 2>/dev/null || true
+    echo -e "${YELLOW}Disabling existing indexer.service...${NC}"
+    systemctl disable indexer.service 2>/dev/null || true
+fi
+
+# Step 1: Build the binary
+echo -e "${YELLOW}[1/5]${NC} Building indexer binary..."
+GO_BIN="$GO_BIN" make build || "$GO_BIN" build -o indexer
+
 # Step 2: Install binary
 echo -e "${YELLOW}[2/5]${NC} Installing binary to /usr/local/bin..."
-cp "$BINARY_PATH" /usr/local/bin/indexer
+cp indexer /usr/local/bin/indexer
 chmod +x /usr/local/bin/indexer
 echo -e "${GREEN}✓${NC} Binary installed"
 
 # Step 3: Install systemd files
 echo -e "${YELLOW}[3/5]${NC} Installing systemd files..."
-cp "$SERVICE_FILE" /etc/systemd/system/
+cp systemd/indexer.service /etc/systemd/system/
 echo -e "${GREEN}✓${NC} Systemd files installed"
 
 # Optional: seed /etc/default/indexer if missing
@@ -56,12 +59,12 @@ if [ ! -f /etc/default/indexer ]; then
 # Environment for indexer.service
 INDEXER_PATH=/
 INDEXER_NAME=root
-INDEXER_INCLUDE_HIDDEN=false
+INDEXER_INCLUDE_HIDDEN=true
 INDEXER_SOCKET=/var/run/indexer.sock
-INDEXER_DB_PATH=/var/run/indexer.db
-INDEXER_LISTEN=
-# Set to duration (e.g., 6h) to enable in-process interval scans; 0 disables.
-INDEXER_INTERVAL=0
+INDEXER_DB_PATH=/tmp/indexer.db
+INDEXER_LISTEN_FLAG=
+# Set to Go duration (e.g., 6h, 30m). Units are required; 0 disables.
+INDEXER_INTERVAL=1h
 EOF
     echo -e "${GREEN}✓${NC} /etc/default/indexer created (edit to suit your system)"
 fi
