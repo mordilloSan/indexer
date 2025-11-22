@@ -1,0 +1,12 @@
+*.db
+*.bak
+*.log
+
+indexer*
+indexer
+.cache
+.vscode
+benchmark_results
+reindex_memory.csv
+fresh_memory.csv
+.go*

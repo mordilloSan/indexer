@@ -1,0 +1,582 @@
+package cmd
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/mordilloSan/go_logger/logger"
+
+	"indexer/indexing"
+	"indexer/storage"
+)
+
+// DaemonConfig controls the long-running server.
+type DaemonConfig struct {
+	IndexName     string
+	IndexPath     string
+	IncludeHidden bool
+	DBPath        string
+	SocketPath    string
+	ListenAddr    string
+	Interval      time.Duration
+}
+
+type daemon struct {
+	cfg     DaemonConfig
+	db      *sql.DB
+	servers []*http.Server
+	running atomic.Bool
+}
+
+func NewDaemon(cfg DaemonConfig) (*daemon, error) {
+	if cfg.IndexPath == "" {
+		return nil, fmt.Errorf("index path is required")
+	}
+	if cfg.IndexName == "" {
+		name := strings.ReplaceAll(cfg.IndexPath, "/", "_")
+		if name == "" || name == "_" {
+			name = "root"
+		}
+		cfg.IndexName = name
+	}
+	if cfg.SocketPath == "" {
+		cfg.SocketPath = "/var/run/indexer.sock"
+	}
+	if cfg.DBPath == "" {
+		cfg.DBPath = "/var/run/indexer.db"
+	}
+
+	db, err := storage.Open(cfg.DBPath)
+	if err != nil {
+		return nil, err
+	}
+
+	return &daemon{
+		cfg: cfg,
+		db:  db,
+	}, nil
+}
+
+func (d *daemon) Close() {
+	logger.Infof("Shutting down daemon...")
+
+	// Gracefully shutdown HTTP servers
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for _, srv := range d.servers {
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			logger.Warnf("Server shutdown error: %v", err)
+		}
+	}
+
+	// Close database connection
+	if d.db != nil {
+		if err := d.db.Close(); err != nil {
+			logger.Warnf("Database close error: %v", err)
+		}
+	}
+
+	// Remove Unix socket if it exists
+	if d.cfg.SocketPath != "" {
+		if err := os.Remove(d.cfg.SocketPath); err != nil && !os.IsNotExist(err) {
+			logger.Warnf("Failed to remove socket: %v", err)
+		}
+	}
+
+	logger.Infof("Daemon shutdown complete")
+}
+
+// run starts the scheduler (if any) and blocks serving HTTP over a Unix socket.
+func (d *daemon) Run(ctx context.Context) error {
+	if d.cfg.Interval > 0 {
+		go d.startScheduler(ctx)
+	}
+	return d.startHTTP(ctx)
+}
+
+func (d *daemon) startScheduler(ctx context.Context) {
+	ticker := time.NewTicker(d.cfg.Interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if err := d.runIndexOnce(context.Background()); err != nil {
+				logger.Errorf("scheduled reindex failed: %v", err)
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (d *daemon) startHTTP(ctx context.Context) error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/openapi.json", serveOpenapi)
+	mux.HandleFunc("/reindex", d.handleReindex)
+	mux.HandleFunc("/status", d.handleStatus)
+	mux.HandleFunc("/search", d.handleSearch)
+	mux.HandleFunc("/dirsize", d.handleDirSize)
+	mux.HandleFunc("/add", d.handleAdd)
+	mux.HandleFunc("/delete", d.handleDelete)
+	mux.HandleFunc("/entries", d.handleEntries)
+
+	errCh := make(chan error, 2)
+	serverCount := 0
+
+	// Unix socket listener
+	if d.cfg.SocketPath != "" {
+		if err := os.RemoveAll(d.cfg.SocketPath); err != nil {
+			return fmt.Errorf("remove stale socket: %w", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(d.cfg.SocketPath), 0o755); err != nil {
+			return fmt.Errorf("mkdir socket dir: %w", err)
+		}
+
+		l, err := net.Listen("unix", d.cfg.SocketPath)
+		if err != nil {
+			return fmt.Errorf("listen on unix socket: %w", err)
+		}
+		if err := os.Chmod(d.cfg.SocketPath, 0o666); err != nil {
+			return fmt.Errorf("chmod socket: %w", err)
+		}
+
+		srv := &http.Server{Handler: mux, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second}
+		d.servers = append(d.servers, srv)
+		serverCount++
+		logger.Infof("API listening on unix://%s", d.cfg.SocketPath)
+		go func() {
+			errCh <- srv.Serve(l)
+		}()
+	}
+
+	// Optional TCP listener
+	if d.cfg.ListenAddr != "" {
+		tcpSrv := &http.Server{Addr: d.cfg.ListenAddr, Handler: mux, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second}
+		d.servers = append(d.servers, tcpSrv)
+		serverCount++
+		logger.Infof("API listening on http://localhost%s", d.cfg.ListenAddr)
+		go func() {
+			errCh <- tcpSrv.ListenAndServe()
+		}()
+	}
+
+	if serverCount == 0 {
+		return fmt.Errorf("no listeners configured")
+	}
+
+	select {
+	case <-ctx.Done():
+		for _, srv := range d.servers {
+			_ = srv.Shutdown(context.Background())
+		}
+		return nil
+	case err := <-errCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	}
+}
+
+func (d *daemon) tryLockIndex() bool {
+	return d.running.CompareAndSwap(false, true)
+}
+
+func (d *daemon) unlockIndex() {
+	d.running.Store(false)
+}
+
+// runIndexOnce performs a full streaming reindex using the shared DB connection.
+func (d *daemon) runIndexOnce(ctx context.Context) error {
+	if !d.tryLockIndex() {
+		return fmt.Errorf("indexer already running")
+	}
+	defer d.unlockIndex()
+	return d.runIndex(ctx)
+}
+
+// runIndex contains the indexing workflow and assumes the caller holds the lock.
+func (d *daemon) runIndex(ctx context.Context) error {
+	index := indexing.Initialize(d.cfg.IndexName, d.cfg.IndexPath, d.cfg.IndexPath, d.cfg.IncludeHidden)
+
+	start := time.Now()
+
+	indexID, err := d.prepareIndexRecord(ctx)
+	if err != nil {
+		return err
+	}
+
+	writer := storage.NewStreamingWriter(d.db, indexID, 2000)
+	index.EnableStreaming(writer)
+
+	if err := index.StartIndexing(); err != nil {
+		_ = writer.Close()
+		return err
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("streaming writer: %w", err)
+	}
+
+	// Cleanup deleted entries (files that were not seen during this scan)
+	scanTime := writer.ScanTime()
+	deleted, err := storage.CleanupDeletedEntries(ctx, d.db, indexID, scanTime)
+	if err != nil {
+		return fmt.Errorf("cleanup deleted entries: %w", err)
+	}
+	if deleted > 0 {
+		logger.Infof("Cleaned up %d deleted entries", deleted)
+	}
+
+	_, err = d.db.ExecContext(ctx, `
+		UPDATE indexes SET
+			num_dirs = ?,
+			num_files = ?,
+			total_size = ?,
+			disk_used = ?,
+			disk_total = ?,
+			last_indexed = ?
+		WHERE id = ?;
+	`,
+		index.NumDirs,
+		index.NumFiles,
+		int64(index.GetTotalSize()),
+		int64(index.DiskUsed),
+		int64(index.DiskTotal),
+		time.Now().UTC().Unix(),
+		indexID,
+	)
+	logger.Infof("Index run complete in %v (dirs=%d files=%d)", time.Since(start).Truncate(time.Millisecond), index.NumDirs, index.NumFiles)
+	return err
+}
+
+func (d *daemon) prepareIndexRecord(ctx context.Context) (int64, error) {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var existingLastIndexed sql.NullInt64
+	_ = tx.QueryRowContext(ctx, `SELECT last_indexed FROM indexes WHERE name = ?;`, d.cfg.IndexName).Scan(&existingLastIndexed)
+	lastIndexed := int64(0)
+	if existingLastIndexed.Valid {
+		lastIndexed = existingLastIndexed.Int64
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO indexes (
+			name, root_path, source, include_hidden,
+			num_dirs, num_files, total_size, disk_used,
+			disk_total, last_indexed,
+			index_duration_ms, export_duration_ms, vacuum_duration_ms
+		) VALUES (?, ?, ?, ?, 0, 0, 0, 0, 0, ?, 0, 0, 0)
+		ON CONFLICT(name) DO UPDATE SET
+			root_path=excluded.root_path,
+			source=excluded.source,
+			include_hidden=excluded.include_hidden;
+	`,
+		d.cfg.IndexName,
+		d.cfg.IndexPath,
+		d.cfg.IndexPath,
+		boolToInt(d.cfg.IncludeHidden),
+		lastIndexed,
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	var indexID int64
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM indexes WHERE name = ?;`, d.cfg.IndexName).Scan(&indexID); err != nil {
+		return 0, err
+	}
+
+	err = tx.Commit()
+	return indexID, err
+}
+
+func (d *daemon) latestIndexID(ctx context.Context) (int64, error) {
+	var id int64
+	err := d.db.QueryRowContext(ctx, `SELECT id FROM indexes ORDER BY last_indexed DESC LIMIT 1`).Scan(&id)
+	return id, err
+}
+
+func (d *daemon) handleReindex(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "use POST", http.StatusMethodNotAllowed)
+		return
+	}
+	if !d.tryLockIndex() {
+		http.Error(w, "indexer already running", http.StatusConflict)
+		return
+	}
+	go func() {
+		defer d.unlockIndex()
+		if err := d.runIndex(context.Background()); err != nil {
+			logger.Errorf("manual reindex failed: %v", err)
+		}
+	}()
+	w.WriteHeader(http.StatusAccepted)
+	_, _ = w.Write([]byte(`{"status":"running"}`))
+}
+
+func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	var stats struct {
+		Status      string `json:"status"`
+		NumDirs     int64  `json:"num_dirs,omitempty"`
+		NumFiles    int64  `json:"num_files,omitempty"`
+		TotalSize   int64  `json:"total_size,omitempty"`
+		LastIndexed string `json:"last_indexed,omitempty"`
+	}
+	if d.running.Load() {
+		stats.Status = "running"
+	} else {
+		stats.Status = "idle"
+	}
+
+	// Get database statistics from the most recent index
+	var numDirs, numFiles, totalSize sql.NullInt64
+	var lastIndexed sql.NullInt64
+	err := d.db.QueryRowContext(ctx, `
+		SELECT num_dirs, num_files, total_size, last_indexed
+		FROM indexes
+		ORDER BY last_indexed DESC
+		LIMIT 1
+	`).Scan(&numDirs, &numFiles, &totalSize, &lastIndexed)
+
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// no data yet; keep defaults
+	case err != nil:
+		http.Error(w, fmt.Sprintf("error loading status: %v", err), http.StatusInternalServerError)
+		return
+	default:
+		if numDirs.Valid {
+			stats.NumDirs = numDirs.Int64
+		}
+		if numFiles.Valid {
+			stats.NumFiles = numFiles.Int64
+		}
+		if totalSize.Valid {
+			stats.TotalSize = totalSize.Int64
+		}
+		if lastIndexed.Valid && lastIndexed.Int64 > 0 {
+			stats.LastIndexed = time.Unix(lastIndexed.Int64, 0).UTC().Format(time.RFC3339)
+		}
+	}
+
+	writeJSON(w, stats)
+}
+
+func (d *daemon) handleSearch(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	limit := 100
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil && v > 0 {
+			limit = v
+		}
+	}
+	store := storage.NewStoreWithDB(d.db)
+	results, err := store.SearchEntries(q, limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, results)
+}
+
+func (d *daemon) handleEntries(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		path = "/"
+	}
+	recursive := r.URL.Query().Get("recursive") == "true"
+	limit := 200
+	offset := 0
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil && v > 0 {
+			limit = v
+		}
+	}
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if v, err := strconv.Atoi(o); err == nil && v >= 0 {
+			offset = v
+		}
+	}
+
+	store := storage.NewStoreWithDB(d.db)
+	results, err := store.QueryPath(path, recursive, limit, offset)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, results)
+}
+
+func (d *daemon) handleDirSize(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		path = "/"
+	}
+	store := storage.NewStoreWithDB(d.db)
+	total, err := store.DirSize(path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"path":  path,
+		"size":  total,
+		"bytes": total,
+	})
+}
+
+func (d *daemon) handleAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "use POST", http.StatusMethodNotAllowed)
+		return
+	}
+	var payload struct {
+		Path    string `json:"path"`
+		AbsPath string `json:"absPath"`
+		Name    string `json:"name"`
+		Size    int64  `json:"size"`
+		IsDir   bool   `json:"isDir"`
+		Type    string `json:"type"`
+		Hidden  bool   `json:"hidden"`
+		ModUnix int64  `json:"modUnix"`
+		Inode   uint64 `json:"inode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, fmt.Sprintf("invalid body: %v", err), http.StatusBadRequest)
+		return
+	}
+	if payload.Path == "" || payload.Name == "" {
+		http.Error(w, "path and name are required", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	indexID, err := d.latestIndexID(ctx)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("no index present: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	relPath := normalizeRelativePath(payload.Path)
+	absPath := payload.AbsPath
+	if absPath == "" {
+		absPath = payload.Path
+	}
+	modUnix := payload.ModUnix
+	if modUnix == 0 {
+		modUnix = time.Now().UTC().Unix()
+	}
+	entryType := payload.Type
+	if entryType == "" {
+		if payload.IsDir {
+			entryType = "directory"
+		} else {
+			entryType = "file"
+		}
+	}
+
+	entry := indexing.IndexEntry{
+		RelativePath: relPath,
+		AbsolutePath: absPath,
+		Name:         payload.Name,
+		Size:         payload.Size,
+		ModTime:      time.Unix(modUnix, 0),
+		Type:         entryType,
+		Hidden:       payload.Hidden,
+		IsDir:        payload.IsDir,
+		Inode:        payload.Inode,
+	}
+
+	if err := storage.UpsertEntryWithSizeUpdate(ctx, d.db, indexID, entry); err != nil {
+		http.Error(w, fmt.Sprintf("upsert failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (d *daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "use DELETE", http.StatusMethodNotAllowed)
+		return
+	}
+	path := strings.TrimSpace(r.URL.Query().Get("path"))
+	if path == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	indexID, err := d.latestIndexID(ctx)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("no index present: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	relPath := normalizeRelativePath(path)
+	if err := storage.DeleteEntryWithSizeUpdate(ctx, d.db, indexID, relPath); err != nil {
+		http.Error(w, fmt.Sprintf("delete failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func normalizeRelativePath(p string) string {
+	if p == "" || p == "/" {
+		return "/"
+	}
+	return "/" + strings.Trim(p, "/")
+}
+
+// Minimal OpenAPI spec served at /openapi.json
+func serveOpenapi(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(openapiSpec))
+}
+
+const openapiSpec = `{
+  "openapi": "3.0.0",
+  "info": { "title": "Indexer API", "version": "1.0.0" },
+  "paths": {
+    "/reindex": { "post": { "summary": "Trigger reindex", "responses": { "202": {"description": "Started"}, "409": {"description": "Already running"} } } },
+    "/status": { "get": { "summary": "Get status", "responses": { "200": {"description": "Status"} } } },
+    "/search": { "get": { "summary": "Search entries", "parameters": [{ "in": "query", "name": "q", "schema": {"type": "string"} }, { "in": "query", "name": "limit", "schema": {"type": "integer"} }], "responses": { "200": {"description": "Results"} } } },
+    "/dirsize": { "get": { "summary": "Directory size", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"} }], "responses": { "200": {"description": "Size"} } } },
+    "/entries": { "get": { "summary": "List entries", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"} }, { "in": "query", "name": "recursive", "schema": {"type": "boolean"} }, { "in": "query", "name": "limit", "schema": {"type": "integer"} }, { "in": "query", "name": "offset", "schema": {"type": "integer"} }], "responses": { "200": {"description": "Entries"} } } },
+    "/add": { "post": { "summary": "Upsert entry", "responses": { "200": {"description": "OK"} } } },
+    "/delete": { "delete": { "summary": "Delete entry", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"} }], "responses": { "200": {"description": "OK"} } } }
+  }
+}`
