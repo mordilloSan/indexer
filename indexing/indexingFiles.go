@@ -21,25 +21,6 @@ var (
 	ErrNotIndexed = errors.New("path not indexed")
 )
 
-type realPathCacheEntry struct {
-	realPath  string
-	isDir     bool
-	expiresAt time.Time
-}
-
-var (
-	realPathCache    = make(map[string]realPathCacheEntry)
-	realPathCacheMu  sync.RWMutex
-	realPathCacheTTL = 12 * time.Hour
-)
-
-// actionConfig holds all configuration options for indexing operations
-type actionConfig struct {
-	Quick         bool // whether to perform a quick scan (skip unchanged directories)
-	Recursive     bool // whether to recursively index subdirectories
-	IsRoutineScan bool // whether this is a routine/scheduled scan (vs initial indexing)
-}
-
 // reduced index is json exposed to the client
 type ReducedIndex struct {
 	IdxName         string      `json:"name"`
@@ -51,7 +32,6 @@ type ReducedIndex struct {
 	NumDeleted      uint64      `json:"numDeleted"`
 	LastIndexed     time.Time   `json:"-"`
 	LastIndexedUnix int64       `json:"lastIndexedUnixTime"`
-	QuickScanTime   int         `json:"quickScanDurationSeconds"`
 	FullScanTime    int         `json:"fullScanDurationSeconds"`
 	Assessment      string      `json:"assessment"`
 }
@@ -83,7 +63,6 @@ type Index struct {
 	processedInodes            map[uint64]struct{}           `json:"-"` // tracks processed inodes for hardlinks
 	totalSize                  uint64                        `json:"-"` // total size
 	mu                         sync.RWMutex                  `json:"-"` // protects concurrent access
-	quickScan                  bool                          `json:"-"`
 
 	// Streaming mode fields
 	streamingMode bool                    `json:"-"` // if true, use streaming instead of in-memory
@@ -219,17 +198,7 @@ func (idx *Index) StartIndexing() error {
 	idx.SetStatus(INDEXING)
 	logger.Infof("starting indexing for [%s] at path [%s]", idx.Name, idx.Path)
 
-	idx.mu.Lock()
-	quick := idx.quickScan
-	idx.quickScan = false
-	idx.mu.Unlock()
-
-	config := actionConfig{
-		Quick:     quick,
-		Recursive: true,
-	}
-
-	err := idx.indexDirectory("/", config)
+	err := idx.indexDirectory("/", true)
 	if err != nil {
 		idx.SetStatus(UNAVAILABLE)
 		return err
@@ -241,13 +210,13 @@ func (idx *Index) StartIndexing() error {
 	return nil
 }
 
-// indexDirectoryWithOptions wraps indexDirectory with actionConfig
-func (idx *Index) indexDirectoryWithOptions(adjustedPath string, config actionConfig) error {
-	return idx.indexDirectory(adjustedPath, config)
+// indexDirectoryWithOptions wraps indexDirectory
+func (idx *Index) indexDirectoryWithOptions(adjustedPath string, recursive bool) error {
+	return idx.indexDirectory(adjustedPath, recursive)
 }
 
-// Define a function to recursively index files and directories
-func (idx *Index) indexDirectory(adjustedPath string, config actionConfig) error {
+// indexDirectory recursively indexes files and directories
+func (idx *Index) indexDirectory(adjustedPath string, recursive bool) error {
 	// Normalize path to always have trailing slash (except for root which is just "/")
 	if adjustedPath != "/" {
 		adjustedPath = strings.TrimSuffix(adjustedPath, "/") + "/"
@@ -273,7 +242,7 @@ func (idx *Index) indexDirectory(adjustedPath string, config actionConfig) error
 	}
 
 	// if indexing, mark the directory as valid and indexed.
-	if config.Recursive {
+	if recursive {
 		// Prevent race conditions if scanning becomes concurrent in the future.
 		idx.mu.Lock()
 		idx.DirectoriesLedger[adjustedPath] = struct{}{}
@@ -281,39 +250,22 @@ func (idx *Index) indexDirectory(adjustedPath string, config actionConfig) error
 	}
 	// adjustedPath is already normalized with trailing slash
 	combinedPath := adjustedPath
-	// get whats currently in cache
+	// Check if directory was modified since last index
 	idx.mu.RLock()
-	cacheDirItems := []iteminfo.ItemInfo{}
 	modChange := false
 	cachedDir, exists := idx.Directories[adjustedPath]
 	if exists {
 		modChange = dirInfo.ModTime() != cachedDir.ModTime
-		cacheDirItems = cachedDir.Folders
 	}
 	idx.mu.RUnlock()
 
-	// If the directory has not been modified since the last index, skip expensive readdir
-	// recursively check cached dirs for mod time changes as well
-	if config.Recursive {
-		if modChange {
-			idx.mu.Lock()
-			idx.FilesChangedDuringIndexing = true
-			idx.mu.Unlock()
-		} else if config.Quick {
-			for _, item := range cacheDirItems {
-				subConfig := actionConfig{
-					Quick:     config.Quick,
-					Recursive: true,
-				}
-				err = idx.indexDirectory(combinedPath+item.Name, subConfig)
-				if err != nil && err != ErrNotIndexed {
-					logger.Errorf("error indexing directory %v : %v", combinedPath+item.Name, err)
-				}
-			}
-			return nil
-		}
+	// Track if files changed during indexing
+	if recursive && modChange {
+		idx.mu.Lock()
+		idx.FilesChangedDuringIndexing = true
+		idx.mu.Unlock()
 	}
-	dirFileInfo, err2 := idx.GetDirInfo(dir, dirInfo, realPath, adjustedPath, combinedPath, config)
+	dirFileInfo, err2 := idx.GetDirInfo(dir, dirInfo, realPath, adjustedPath, combinedPath, recursive)
 	if err2 != nil {
 		return err2
 	}
@@ -331,7 +283,7 @@ func (idx *Index) indexDirectory(adjustedPath string, config actionConfig) error
 		}
 
 		// Write directory entry to database if recursive
-		if config.Recursive {
+		if recursive {
 			normalized := normalizeRelativePath(adjustedPath)
 			absDirPath := idx.realPathFromCombined(adjustedPath)
 
@@ -399,10 +351,7 @@ func (idx *Index) GetFsDirInfo(adjustedPath string) (*iteminfo.FileInfo, error) 
 	// adjustedPath is already normalized with trailing slash
 	combinedPath := adjustedPath
 	var response *iteminfo.FileInfo
-	response, err = idx.GetDirInfo(dir, dirInfo, realPath, adjustedPath, combinedPath, actionConfig{
-		Quick:     false,
-		Recursive: false,
-	})
+	response, err = idx.GetDirInfo(dir, dirInfo, realPath, adjustedPath, combinedPath, false)
 	if err != nil {
 		return nil, err
 	}
@@ -431,7 +380,7 @@ func (idx *Index) GetFsDirInfo(adjustedPath string) (*iteminfo.FileInfo, error) 
 
 }
 
-func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjustedPath, combinedPath string, config actionConfig) (*iteminfo.FileInfo, error) {
+func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjustedPath, combinedPath string, recursive bool) (*iteminfo.FileInfo, error) {
 	// Ensure combinedPath has exactly one trailing slash to prevent double slashes in subdirectory paths
 	combinedPath = strings.TrimRight(combinedPath, "/") + "/"
 	// Read directory contents
@@ -469,9 +418,9 @@ func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjus
 			dirPath := combinedPath + file.Name()
 			dirMapKey := normalizeIndexPath(dirPath)
 
-			if config.Recursive {
+			if recursive {
 				// Recursively index the subdirectory
-				err = idx.indexDirectory(dirPath, config)
+				err = idx.indexDirectory(dirPath, recursive)
 				if err != nil {
 					logger.Debugf("Failed to %v", err)
 					continue
@@ -498,7 +447,7 @@ func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjus
 			totalSize += itemInfo.Size
 			itemInfo.Type = "directory"
 			dirInfos = append(dirInfos, *itemInfo)
-			if config.Recursive {
+			if recursive {
 				idx.NumDirs++
 			}
 		} else {
@@ -510,12 +459,12 @@ func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjus
 			if shouldCountSize {
 				totalSize += itemInfo.Size
 			}
-			if config.Recursive {
+			if recursive {
 				idx.NumFiles++
 			}
 
 			// In streaming mode, write file immediately to database
-			if streaming && config.Recursive {
+			if streaming && recursive {
 				normalized := normalizeRelativePath(adjustedPath)
 				childPath := makeChildRelativePath(normalized, baseName)
 				absPath := filepath.Join(realPath, baseName)
@@ -569,74 +518,52 @@ func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjus
 }
 
 func (idx *Index) recursiveUpdateDirSizes(childInfo *iteminfo.FileInfo, previousSize int64) {
-	parentDir := iteminfo.GetParentDirectoryPath(childInfo.Path)
-
-	if parentDir == "" {
-		return
-	}
-
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
-
-	parentInfo, exists := idx.Directories[parentDir]
-	if !exists {
-		return
-	}
-
-	// Calculate size delta and update parent
-	previousParentSize := parentInfo.Size
+	// Calculate the size delta once at the start
 	sizeDelta := childInfo.Size - previousSize
-	parentInfo.Size = previousParentSize + sizeDelta
+	if sizeDelta == 0 {
+		return
+	}
 
-	idx.Directories[parentDir] = parentInfo
+	// Iteratively walk up the directory tree, updating each parent's size
+	currentPath := childInfo.Path
+	for {
+		parentDir := iteminfo.GetParentDirectoryPath(currentPath)
+		if parentDir == "" {
+			break
+		}
 
-	// Note: We unlock here before recursion to avoid deadlock
-	idx.mu.Unlock()
-	idx.recursiveUpdateDirSizes(parentInfo, previousParentSize)
-	idx.mu.Lock() // Re-lock for the defer
+		// Lock, update, unlock for each parent
+		idx.mu.Lock()
+		parentInfo, exists := idx.Directories[parentDir]
+		if !exists {
+			idx.mu.Unlock()
+			break
+		}
+
+		// Update parent size with the delta
+		parentInfo.Size += sizeDelta
+		idx.Directories[parentDir] = parentInfo
+		idx.mu.Unlock()
+
+		// Move up to the next parent
+		currentPath = parentDir
+	}
 }
 
 func (idx *Index) GetRealPath(relativePath ...string) (string, bool, error) {
 	combined := append([]string{idx.Path}, relativePath...)
 	joinedPath := filepath.Join(combined...)
 
-	// Normalize first so cache keys are consistent
 	absolutePath, err := filepath.Abs(joinedPath)
 	if err != nil {
 		return absolutePath, false, fmt.Errorf("could not get real path: %v, %s", joinedPath, err)
 	}
 
-	now := time.Now()
-	realPathCacheMu.RLock()
-	if entry, ok := realPathCache[absolutePath]; ok && entry.expiresAt.After(now) {
-		realPathCacheMu.RUnlock()
-		return entry.realPath, entry.isDir, nil
-	}
-	realPathCacheMu.RUnlock()
-
-	// Convert relative path to absolute path
 	// Resolve symlinks and get the real path
-	realPath, isDir, err := iteminfo.ResolveSymlinks(absolutePath)
-
-	if err == nil {
-		realPathCacheMu.Lock()
-		realPathCache[absolutePath] = realPathCacheEntry{
-			realPath:  realPath,
-			isDir:     isDir,
-			expiresAt: now.Add(realPathCacheTTL),
-		}
-		realPathCacheMu.Unlock()
-	}
-
-	return realPath, isDir, err
+	return iteminfo.ResolveSymlinks(absolutePath)
 }
 
 func (idx *Index) RefreshFileInfo(opts iteminfo.FileOptions) error {
-	config := actionConfig{
-		Quick:     false,
-		Recursive: opts.Recursive,
-	}
-
 	targetPath := opts.Path
 	if !opts.IsDir {
 		targetPath = idx.MakeIndexPath(filepath.Dir(targetPath))
@@ -651,7 +578,7 @@ func (idx *Index) RefreshFileInfo(opts iteminfo.FileOptions) error {
 	idx.mu.RUnlock()
 
 	// Re-index the directory
-	err := idx.indexDirectoryWithOptions(targetPath, config)
+	err := idx.indexDirectoryWithOptions(targetPath, opts.Recursive)
 	if err != nil {
 		return err
 	}
@@ -727,6 +654,36 @@ func (idx *Index) GetTotalSize() uint64 {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 	return idx.totalSize
+}
+
+// Cleanup releases memory from temporary indexing structures after indexing completes.
+// This helps reduce memory usage, especially for large filesystem scans.
+func (idx *Index) Cleanup() {
+	idx.mu.Lock()
+
+	// Clear hardlink tracking maps (only needed during indexing)
+	idx.processedInodes = make(map[uint64]struct{})
+	idx.FoundHardLinks = make(map[string]uint64)
+
+	// In streaming mode, clear directory metadata (already persisted to DB)
+	if idx.streamingMode {
+		idx.dirMetadata = make(map[string]*DirMetadata)
+	} else {
+		// In non-streaming mode, clear the Directories map
+		// (data is already persisted to DB or memory)
+		idx.Directories = make(map[string]*iteminfo.FileInfo)
+	}
+
+	// Clear the ledger as well
+	idx.DirectoriesLedger = make(map[string]struct{})
+
+	name := idx.Name
+	idx.mu.Unlock()
+
+	// Remove this index from the global map - it's never read and wastes memory
+	indexesMutex.Lock()
+	delete(indexes, name)
+	indexesMutex.Unlock()
 }
 
 func (idx *Index) isLinuxSystemPath(fullCombined string) bool {

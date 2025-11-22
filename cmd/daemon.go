@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -265,6 +267,15 @@ func (d *daemon) runIndex(ctx context.Context) error {
 		indexID,
 	)
 	logger.Infof("Index run complete in %v (dirs=%d files=%d)", time.Since(start).Truncate(time.Millisecond), index.NumDirs, index.NumFiles)
+
+	// Free memory from Index's internal maps before GC
+	index.Cleanup()
+
+	// Aggressively reclaim memory from indexing
+	runtime.GC()         // Run garbage collection
+	debug.FreeOSMemory() // Force return memory to OS immediately
+	runtime.GC()         // Run GC again after freeing
+
 	return err
 }
 

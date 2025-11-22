@@ -64,35 +64,17 @@ func main() {
 	defer d.Close()
 
 	// Log startup configuration
-	logger.Infof("Starting indexer daemon")
-	logger.Infof("Index path: %s", cfg.IndexPath)
-	if *indexName == "" {
-		logger.Infof("Index name: %s (sanitized from path)", cfg.IndexName)
-	} else {
-		logger.Infof("Index name: %s", cfg.IndexName)
+	listenDisplay := cfg.ListenAddr
+	if listenDisplay == "" {
+		listenDisplay = "disabled"
 	}
+	logger.Infof("Starting indexer daemon path=%s name=%s db=%s socket=%s listen=%s includeHidden=%t interval=%v",
+		cfg.IndexPath, cfg.IndexName, cfg.DBPath, cfg.SocketPath, listenDisplay, cfg.IncludeHidden, cfg.Interval)
 	if *dbPath == "" && os.Getenv("INDEXER_DB_PATH") == "" {
 		logger.Warnf("DB path not set; defaulting to %s", cfg.DBPath)
-	} else {
-		logger.Infof("DB path: %s", cfg.DBPath)
 	}
 	if *socketPath == "" {
 		logger.Warnf("Socket path empty; defaulting to %s", cfg.SocketPath)
-	} else {
-		logger.Infof("Socket path: %s", cfg.SocketPath)
-	}
-	if cfg.ListenAddr == "" {
-		logger.Infof("TCP listener: disabled")
-	} else {
-		logger.Infof("TCP listener: %s", cfg.ListenAddr)
-	}
-	if cfg.Interval > 0 {
-		logger.Infof("Auto-reindex: every %v", cfg.Interval)
-	} else {
-		logger.Infof("Auto-reindex: disabled")
-	}
-	if cfg.IncludeHidden {
-		logger.Infof("Including hidden files")
 	}
 
 	// Setup graceful shutdown
