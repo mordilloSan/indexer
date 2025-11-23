@@ -1,6 +1,6 @@
 # Indexer Benchmark Results
 
-**Generated:** 2025-11-22 18:41:10 UTC
+**Generated:** 2025-11-23 09:07:48 UTC
 **Host:** ubuntuserver
 **CPU:** Intel(R) N100
 **Memory:** 15Gi
@@ -18,30 +18,30 @@
 - Reindex (After Deletions): rerun after removing synthetic files (optional)
 ## Summary
 
-- Fresh DB: 12.085s, idle 9.30 MB, max 188.60 MB, avg 119.14 MB, entries 982016 (dirs 237704, files 744312), DB 380M, cleaned 0
-- Reindex (After Deletions): 12.074s, idle 9.30 MB, max 187.63 MB, avg 117.12 MB, entries 981016 (dirs 237704, files 743312), DB 380M, cleaned 1000
+- Fresh DB: 16.111s, idle 9.24 MB, max 161.55 MB, avg 93.42 MB, entries 993303 (dirs 238072, files 755231), DB 384M, cleaned 0
+- Reindex (After Deletions): 16.104s, idle 9.25 MB, max 153.27 MB, avg 79.20 MB, entries 992303 (dirs 238072, files 754231), DB 384M, cleaned 1000
 
 ## Results
 
 ### Fresh DB
-- Duration: 12.085s
-- Idle Memory: 9.30 MB (after startup, before reindex)
-- Max Memory: 188.60 MB
-- Avg Memory: 119.14 MB
-- Entries: 982016 (dirs 237704, files 744312)
-- DB Size: 380M
+- Duration: 16.111s
+- Idle Memory: 9.24 MB (after startup, before reindex)
+- Max Memory: 161.55 MB
+- Avg Memory: 93.42 MB
+- Entries: 993303 (dirs 238072, files 755231)
+- DB Size: 384M
 - Deleted Entries: 0
-- Snapshot Mem: VmRSS 185.29 MB (VmHWM 188.43 MB, VmPeak 2061.61 MB)
+- Snapshot Mem: VmRSS 22.75 MB (VmHWM 161.07 MB, VmPeak 1986.70 MB)
 - Snapshot File: /tmp/benchmark_Fresh_DB_top.txt
 
 ### Reindex (After Deletions)
-- Duration: 12.074s
-- Idle Memory: 9.30 MB (after startup, before reindex)
-- Max Memory: 187.63 MB
-- Avg Memory: 117.12 MB
-- Entries: 981016 (dirs 237704, files 743312)
-- DB Size: 380M
+- Duration: 16.104s
+- Idle Memory: 9.25 MB (after startup, before reindex)
+- Max Memory: 153.27 MB
+- Avg Memory: 79.20 MB
+- Entries: 992303 (dirs 238072, files 754231)
+- DB Size: 384M
 - Deleted Entries: 1000
-- Snapshot Mem: VmRSS 180.79 MB (VmHWM 187.34 MB, VmPeak 2061.29 MB)
+- Snapshot Mem: VmRSS 24.14 MB (VmHWM 162.83 MB, VmPeak 2058.77 MB)
 - Snapshot File: /tmp/benchmark_Reindex__After_Deletions__top.txt
 

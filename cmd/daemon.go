@@ -97,14 +97,91 @@ func (d *daemon) Close() {
 		}
 	}
 
-	// Remove Unix socket if it exists
-	if d.cfg.SocketPath != "" {
+	// Remove Unix socket only if we created it (not systemd-managed)
+	if d.cfg.SocketPath != "" && !isSystemdSocket() {
 		if err := os.Remove(d.cfg.SocketPath); err != nil && !os.IsNotExist(err) {
 			logger.Warnf("Failed to remove socket: %v", err)
 		}
 	}
 
 	logger.Infof("Daemon shutdown complete")
+}
+
+// getUnixListener returns a Unix socket listener, preferring systemd socket activation
+func (d *daemon) getUnixListener() (net.Listener, bool, error) {
+	// Try systemd socket activation first
+	if l := systemdUnixListener(); l != nil {
+		return l, true, nil
+	}
+
+	// Fallback: create socket manually
+	if err := os.Remove(d.cfg.SocketPath); err != nil && !os.IsNotExist(err) {
+		return nil, false, fmt.Errorf("remove stale socket: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(d.cfg.SocketPath), 0o755); err != nil {
+		return nil, false, fmt.Errorf("mkdir socket dir: %w", err)
+	}
+
+	l, err := net.Listen("unix", d.cfg.SocketPath)
+	if err != nil {
+		return nil, false, fmt.Errorf("listen on unix socket: %w", err)
+	}
+	if err := os.Chmod(d.cfg.SocketPath, 0o666); err != nil {
+		l.Close()
+		return nil, false, fmt.Errorf("chmod socket: %w", err)
+	}
+
+	return l, false, nil
+}
+
+// systemdUnixListener checks for systemd socket activation and returns the listener if available
+func systemdUnixListener() net.Listener {
+	// Systemd passes file descriptors via LISTEN_FDS and LISTEN_PID environment variables
+	// FD 3 is the first passed file descriptor (after stdin=0, stdout=1, stderr=2)
+	pid := os.Getenv("LISTEN_PID")
+	fds := os.Getenv("LISTEN_FDS")
+
+	if pid == "" || fds == "" {
+		return nil
+	}
+
+	// Check if this process is the intended recipient
+	if pid != strconv.Itoa(os.Getpid()) {
+		return nil
+	}
+
+	// Check if exactly one FD was passed
+	numFDs, err := strconv.Atoi(fds)
+	if err != nil || numFDs != 1 {
+		return nil
+	}
+
+	// File descriptor 3 is the first systemd-passed socket
+	const systemdFD = 3
+	file := os.NewFile(uintptr(systemdFD), "systemd-socket")
+	if file == nil {
+		return nil
+	}
+
+	// Convert file to listener
+	l, err := net.FileListener(file)
+	if err != nil {
+		file.Close()
+		return nil
+	}
+
+	// Clear environment to prevent child processes from inheriting
+	os.Unsetenv("LISTEN_PID")
+	os.Unsetenv("LISTEN_FDS")
+
+	return l
+}
+
+// isSystemdSocket checks if we're using systemd socket activation
+func isSystemdSocket() bool {
+	pid := os.Getenv("LISTEN_PID")
+	fds := os.Getenv("LISTEN_FDS")
+	return pid != "" && fds != ""
 }
 
 // run starts the scheduler (if any) and blocks serving HTTP over a Unix socket.
@@ -144,27 +221,21 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 	errCh := make(chan error, 2)
 	serverCount := 0
 
-	// Unix socket listener
+	// Unix socket listener - try systemd socket activation first
 	if d.cfg.SocketPath != "" {
-		if err := os.Remove(d.cfg.SocketPath); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove stale socket: %w", err)
-		}
-		if err := os.MkdirAll(filepath.Dir(d.cfg.SocketPath), 0o755); err != nil {
-			return fmt.Errorf("mkdir socket dir: %w", err)
-		}
-
-		l, err := net.Listen("unix", d.cfg.SocketPath)
+		l, isSystemd, err := d.getUnixListener()
 		if err != nil {
-			return fmt.Errorf("listen on unix socket: %w", err)
-		}
-		if err := os.Chmod(d.cfg.SocketPath, 0o666); err != nil {
-			return fmt.Errorf("chmod socket: %w", err)
+			return err
 		}
 
 		srv := &http.Server{Handler: mux, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second}
 		d.servers = append(d.servers, srv)
 		serverCount++
-		logger.Infof("API listening on unix://%s", d.cfg.SocketPath)
+		if isSystemd {
+			logger.Infof("API listening on unix://%s (systemd socket activation)", d.cfg.SocketPath)
+		} else {
+			logger.Infof("API listening on unix://%s", d.cfg.SocketPath)
+		}
 		go func() {
 			errCh <- srv.Serve(l)
 		}()
@@ -230,7 +301,7 @@ func (d *daemon) runIndex(ctx context.Context) error {
 		return err
 	}
 
-	writer := storage.NewStreamingWriter(d.db, indexID, 2000)
+	writer := storage.NewStreamingWriter(ctx, d.db, indexID, 1000)
 	index.EnableStreaming(writer)
 
 	if err := index.StartIndexing(); err != nil {
@@ -279,6 +350,11 @@ func (d *daemon) runIndex(ctx context.Context) error {
 
 	// Free memory from Index's internal maps before GC
 	index.Cleanup()
+
+	// Release SQLite internal caches
+	if err := storage.ReleaseSQLiteMemory(ctx, d.db); err != nil {
+		logger.Warnf("Failed to release SQLite memory: %v", err)
+	}
 
 	// Aggressively reclaim memory from indexing
 	runtime.GC()         // Run garbage collection

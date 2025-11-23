@@ -42,11 +42,15 @@ type StreamingWriter struct {
 }
 
 // NewStreamingWriter creates a writer that batches entries and commits periodically.
-func NewStreamingWriter(db *sql.DB, indexID int64, bufferSize int) *StreamingWriter {
+// The provided ctx allows callers to cancel the writer even if Close is not reached.
+func NewStreamingWriter(ctx context.Context, db *sql.DB, indexID int64, bufferSize int) *StreamingWriter {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if bufferSize <= 0 {
 		bufferSize = 1000
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	sw := &StreamingWriter{
 		db:       db,
 		indexID:  indexID,
@@ -115,6 +119,10 @@ func (sw *StreamingWriter) run() {
 		}
 		if e := sw.writeBatch(batch); e != nil {
 			return e
+		}
+		// Clear backing array to release string references
+		for i := range batch {
+			batch[i] = indexing.IndexEntry{}
 		}
 		batch = batch[:0]
 		return nil
@@ -193,9 +201,10 @@ func Open(path string) (*sql.DB, error) {
 
 	// Configure connection pool for WAL mode concurrent access
 	// WAL mode allows multiple readers + 1 writer simultaneously
-	db.SetMaxOpenConns(5)    // Allow up to 5 concurrent connections
-	db.SetMaxIdleConns(2)    // Keep 2 connections ready
-	db.SetConnMaxLifetime(0) // Reuse connections indefinitely
+	db.SetMaxOpenConns(5)                  // Allow up to 5 concurrent connections
+	db.SetMaxIdleConns(2)                  // Keep 2 connections ready
+	db.SetConnMaxLifetime(0)               // Reuse connections indefinitely while active
+	db.SetConnMaxIdleTime(5 * time.Minute) // Close idle connections to release SQLite caches
 
 	if err := initSchema(ctx, db); err != nil {
 		_ = db.Close()
@@ -598,4 +607,22 @@ func CleanupDeletedEntries(ctx context.Context, db *sql.DB, indexID int64, scanT
 	}
 
 	return deleted, nil
+}
+
+// ReleaseSQLiteMemory forces SQLite to release cached memory.
+// Call this after heavy write operations to return memory to the OS.
+func ReleaseSQLiteMemory(ctx context.Context, db *sql.DB) error {
+	ctx = ensureContext(ctx)
+
+	// Shrink SQLite's page cache
+	if _, err := db.ExecContext(ctx, `PRAGMA shrink_memory;`); err != nil {
+		logger.Warnf("Failed to shrink SQLite memory: %v", err)
+	}
+
+	// Optimize database (lightweight, doesn't rebuild like VACUUM)
+	if _, err := db.ExecContext(ctx, `PRAGMA optimize;`); err != nil {
+		logger.Warnf("Failed to optimize SQLite: %v", err)
+	}
+
+	return nil
 }

@@ -1,6 +1,7 @@
 [Unit]
 Description=Indexer daemon with Unix socket API
-After=network.target
+After=network.target indexer.socket
+Requires=indexer.socket
 
 [Service]
 Type=simple

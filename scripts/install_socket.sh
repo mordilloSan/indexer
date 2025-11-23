@@ -29,12 +29,19 @@ if [ -z "$GO_BIN" ]; then
     exit 1
 fi
 
-# Stop/disable any existing service to avoid conflicts during install
+# Stop/disable any existing service and socket to avoid conflicts during install
 if systemctl list-unit-files | grep -q '^indexer.service'; then
     echo -e "${YELLOW}Stopping existing indexer.service (if running)...${NC}"
     systemctl stop indexer.service 2>/dev/null || true
     echo -e "${YELLOW}Disabling existing indexer.service...${NC}"
     systemctl disable indexer.service 2>/dev/null || true
+fi
+
+if systemctl list-unit-files | grep -q '^indexer.socket'; then
+    echo -e "${YELLOW}Stopping existing indexer.socket (if running)...${NC}"
+    systemctl stop indexer.socket 2>/dev/null || true
+    echo -e "${YELLOW}Disabling existing indexer.socket...${NC}"
+    systemctl disable indexer.socket 2>/dev/null || true
 fi
 
 # Step 1: Build the binary
@@ -50,6 +57,7 @@ echo -e "${GREEN}✓${NC} Binary installed"
 # Step 3: Install systemd files
 echo -e "${YELLOW}[3/5]${NC} Installing systemd files..."
 cp systemd/indexer.service /etc/systemd/system/
+cp systemd/indexer.socket /etc/systemd/system/
 echo -e "${GREEN}✓${NC} Systemd files installed"
 
 # Ensure data directory exists for persistent DB
@@ -73,16 +81,25 @@ EOF
     echo -e "${GREEN}✓${NC} /etc/default/indexer created (edit to suit your system)"
 fi
 
-# Step 4: Reload systemd and enable service
-echo -e "${YELLOW}[4/5]${NC} Enabling systemd service..."
+# Step 4: Reload systemd and enable socket + service
+echo -e "${YELLOW}[4/5]${NC} Enabling systemd socket and service..."
 systemctl daemon-reload
+systemctl enable indexer.socket
 systemctl enable indexer.service
+systemctl start indexer.socket
 systemctl start indexer.service
-echo -e "${GREEN}✓${NC} Service started${NC}"
+echo -e "${GREEN}✓${NC} Socket and service started${NC}"
 
 # Step 5: Verify installation
 echo -e "${YELLOW}[5/5]${NC} Verifying installation..."
 sleep 1
+
+if systemctl is-active --quiet indexer.socket; then
+    echo -e "${GREEN}✓${NC} Socket is active"
+else
+    echo -e "${RED}✗${NC} Socket is not active"
+    exit 1
+fi
 
 if systemctl is-active --quiet indexer.service; then
     echo -e "${GREEN}✓${NC} Service is active"
@@ -101,9 +118,12 @@ echo ""
 echo "  Restart with new settings:"
 echo "    sudo systemctl restart indexer.service"
 echo ""
-echo "  Check service status:"
+echo "  Check status:"
+echo "    sudo systemctl status indexer.socket"
 echo "    sudo systemctl status indexer.service"
 echo ""
 echo "  View logs:"
 echo "    sudo journalctl -u indexer.service -f"
+echo ""
+echo "  Socket location: /var/run/indexer.sock (managed by systemd)"
 echo ""

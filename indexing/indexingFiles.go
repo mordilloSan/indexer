@@ -244,11 +244,12 @@ func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjus
 				}
 			}
 
-			idx.mu.RLock()
+			idx.mu.Lock()
 			if meta, exists := idx.dirMetadata[dirMapKey]; exists {
 				totalSize += meta.Size
+				delete(idx.dirMetadata, dirMapKey)
 			}
-			idx.mu.RUnlock()
+			idx.mu.Unlock()
 
 			if recursive {
 				idx.NumDirs++
@@ -355,6 +356,7 @@ func (idx *Index) Cleanup() {
 	idx.processedInodes = nil
 	idx.FoundHardLinks = nil
 	idx.dirMetadata = nil
+	idx.streamWriter = nil
 	idx.mu.Unlock()
 }
 
