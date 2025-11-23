@@ -121,7 +121,7 @@ func (d *daemon) startScheduler(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			if err := d.runIndexOnce(context.Background()); err != nil {
+			if err := d.runIndexOnce(ctx); err != nil {
 				logger.Errorf("scheduled reindex failed: %v", err)
 			}
 		case <-ctx.Done():
@@ -146,7 +146,7 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 
 	// Unix socket listener
 	if d.cfg.SocketPath != "" {
-		if err := os.RemoveAll(d.cfg.SocketPath); err != nil {
+		if err := os.Remove(d.cfg.SocketPath); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove stale socket: %w", err)
 		}
 		if err := os.MkdirAll(filepath.Dir(d.cfg.SocketPath), 0o755); err != nil {
@@ -192,6 +192,9 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 		}
 		return nil
 	case err := <-errCh:
+		for _, srv := range d.servers {
+			_ = srv.Shutdown(context.Background())
+		}
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
@@ -248,7 +251,7 @@ func (d *daemon) runIndex(ctx context.Context) error {
 		logger.Infof("Cleaned up %d deleted entries", deleted)
 	}
 
-	_, err = d.db.ExecContext(ctx, `
+	if _, err := d.db.ExecContext(ctx, `
 		UPDATE indexes SET
 			num_dirs = ?,
 			num_files = ?,
@@ -265,7 +268,13 @@ func (d *daemon) runIndex(ctx context.Context) error {
 		int64(index.DiskTotal),
 		time.Now().UTC().Unix(),
 		indexID,
-	)
+	); err != nil {
+		index.Cleanup()
+		runtime.GC()
+		debug.FreeOSMemory()
+		runtime.GC()
+		return fmt.Errorf("update index metadata: %w", err)
+	}
 	logger.Infof("Index run complete in %v (dirs=%d files=%d)", time.Since(start).Truncate(time.Millisecond), index.NumDirs, index.NumFiles)
 
 	// Free memory from Index's internal maps before GC
@@ -276,7 +285,7 @@ func (d *daemon) runIndex(ctx context.Context) error {
 	debug.FreeOSMemory() // Force return memory to OS immediately
 	runtime.GC()         // Run GC again after freeing
 
-	return err
+	return nil
 }
 
 func (d *daemon) prepareIndexRecord(ctx context.Context) (int64, error) {
@@ -312,7 +321,7 @@ func (d *daemon) prepareIndexRecord(ctx context.Context) (int64, error) {
 		d.cfg.IndexName,
 		d.cfg.IndexPath,
 		d.cfg.IndexPath,
-		boolToInt(d.cfg.IncludeHidden),
+		indexing.BoolToInt(d.cfg.IncludeHidden),
 		lastIndexed,
 	)
 	if err != nil {
@@ -497,7 +506,7 @@ func (d *daemon) handleAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	relPath := normalizeRelativePath(payload.Path)
+	relPath := indexing.NormalizeIndexPath(payload.Path)
 	absPath := payload.AbsPath
 	if absPath == "" {
 		absPath = payload.Path
@@ -552,7 +561,7 @@ func (d *daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	relPath := normalizeRelativePath(path)
+	relPath := indexing.NormalizeIndexPath(path)
 	if err := storage.DeleteEntryWithSizeUpdate(ctx, d.db, indexID, relPath); err != nil {
 		http.Error(w, fmt.Sprintf("delete failed: %v", err), http.StatusInternalServerError)
 		return
@@ -563,20 +572,6 @@ func (d *daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
-}
-
-func boolToInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}
-
-func normalizeRelativePath(p string) string {
-	if p == "" || p == "/" {
-		return "/"
-	}
-	return "/" + strings.Trim(p, "/")
 }
 
 // Minimal OpenAPI spec served at /openapi.json

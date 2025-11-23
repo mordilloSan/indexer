@@ -2,279 +2,99 @@ package indexing
 
 import (
 	"os"
-	"path/filepath"
+	"sync"
 	"testing"
 
-	"indexer/indexing/iteminfo"
 	"indexer/indexing/testhelpers"
 )
 
-func TestInitialize(t *testing.T) {
-	tests := []struct {
-		name          string
-		indexName     string
-		path          string
-		source        string
-		includeHidden bool
-	}{
-		{
-			name:          "basic initialization",
-			indexName:     "test-index",
-			path:          "/tmp/test",
-			source:        "test-source",
-			includeHidden: false,
-		},
-		{
-			name:          "with hidden files",
-			indexName:     "test-hidden",
-			path:          "/tmp/test2",
-			source:        "test-source-2",
-			includeHidden: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			idx := Initialize(tt.indexName, tt.path, tt.source, tt.includeHidden)
-
-			if idx.Name != tt.indexName {
-				t.Errorf("Expected name %s, got %s", tt.indexName, idx.Name)
-			}
-			if idx.Path != tt.path {
-				t.Errorf("Expected path %s, got %s", tt.path, idx.Path)
-			}
-			if idx.Source != tt.source {
-				t.Errorf("Expected source %s, got %s", tt.source, idx.Source)
-			}
-			if idx.includeHidden != tt.includeHidden {
-				t.Errorf("Expected includeHidden %v, got %v", tt.includeHidden, idx.includeHidden)
-			}
-			if idx.Status != READY {
-				t.Errorf("Expected status READY, got %s", idx.Status)
-			}
-			if idx.Directories == nil {
-				t.Error("Expected Directories map to be initialized")
-			}
-		})
-	}
+type memoryWriter struct {
+	mu      sync.Mutex
+	entries []IndexEntry
 }
 
-func TestIndexDirectory_BasicStructure(t *testing.T) {
-	mock := testhelpers.NewMockFileSystem(t)
-	defer mock.Cleanup()
-
-	mock.CreateStandardTestStructure()
-
-	// Test without hidden files
-	idx := Initialize("test", mock.Root, mock.Root, false)
-	err := idx.StartIndexing()
-	if err != nil {
-		t.Fatalf("StartIndexing failed: %v", err)
-	}
-
-	// Verify basic structure
-	if idx.NumDirs == 0 {
-		t.Error("Expected NumDirs > 0")
-	}
-	if idx.NumFiles == 0 {
-		t.Error("Expected NumFiles > 0")
-	}
-
-	// Check that root directory was indexed
-	rootInfo, exists := idx.Directories["/"]
-	if !exists {
-		t.Fatal("Root directory not found in index")
-	}
-
-	// Verify folders are present
-	foundDocuments := false
-	foundPhotos := false
-	foundCode := false
-
-	for _, folder := range rootInfo.Folders {
-		switch folder.Name {
-		case "documents":
-			foundDocuments = true
-		case "photos":
-			foundPhotos = true
-		case "code":
-			foundCode = true
-		}
-	}
-
-	if !foundDocuments {
-		t.Error("documents folder not found")
-	}
-	if !foundPhotos {
-		t.Error("photos folder not found")
-	}
-	if !foundCode {
-		t.Error("code folder not found")
-	}
+func (w *memoryWriter) Write(e IndexEntry) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.entries = append(w.entries, e)
+	return nil
 }
 
-func TestIndexDirectory_HiddenFiles(t *testing.T) {
-	mock := testhelpers.NewMockFileSystem(t)
-	defer mock.Cleanup()
-
-	mock.CreateStandardTestStructure()
-
-	// Test WITH hidden files
-	idxWithHidden := Initialize("test-with-hidden", mock.Root, mock.Root, true)
-	err := idxWithHidden.StartIndexing()
-	if err != nil {
-		t.Fatalf("StartIndexing with hidden failed: %v", err)
+func (w *memoryWriter) entriesByPath() map[string]IndexEntry {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	result := make(map[string]IndexEntry, len(w.entries))
+	for _, e := range w.entries {
+		result[e.RelativePath] = e
 	}
-
-	filesWithHidden := idxWithHidden.NumFiles
-
-	// Test WITHOUT hidden files
-	idxWithoutHidden := Initialize("test-without-hidden", mock.Root, mock.Root, false)
-	err = idxWithoutHidden.StartIndexing()
-	if err != nil {
-		t.Fatalf("StartIndexing without hidden failed: %v", err)
-	}
-
-	filesWithoutHidden := idxWithoutHidden.NumFiles
-
-	// With hidden files should have MORE files than without
-	if filesWithHidden <= filesWithoutHidden {
-		t.Errorf("Expected more files with hidden (%d) than without (%d)", filesWithHidden, filesWithoutHidden)
-	}
-
-	// Check that hidden files are actually present when includeHidden=true
-	rootInfo, exists := idxWithHidden.Directories["/"]
-	if !exists {
-		t.Fatal("Root directory not found in index with hidden")
-	}
-
-	foundHidden := false
-	for _, file := range rootInfo.Files {
-		if file.Name == ".config" || file.Name == ".hidden_file" {
-			foundHidden = true
-			if !file.Hidden {
-				t.Errorf("File %s should be marked as hidden", file.Name)
-			}
-		}
-	}
-
-	if !foundHidden {
-		t.Error("Expected to find hidden files in root when includeHidden=true")
-	}
+	return result
 }
 
-func TestIndexDirectory_NestedStructure(t *testing.T) {
+func newStreamingIndex(t *testing.T, name, root string, includeHidden bool) (*Index, *memoryWriter) {
+	t.Helper()
+	idx := Initialize(name, root, root, includeHidden)
+	writer := &memoryWriter{}
+	idx.EnableStreaming(writer)
+	return idx, writer
+}
+
+func TestStartIndexingRequiresStreaming(t *testing.T) {
 	mock := testhelpers.NewMockFileSystem(t)
 	defer mock.Cleanup()
-
 	mock.CreateStandardTestStructure()
 
 	idx := Initialize("test", mock.Root, mock.Root, false)
-	err := idx.StartIndexing()
-	if err != nil {
-		t.Fatalf("StartIndexing failed: %v", err)
-	}
-
-	// Check nested directory: /documents/archive/2023/
-	archivePath := "/documents/archive/2023/"
-	archiveInfo, exists := idx.Directories[archivePath]
-	if !exists {
-		t.Fatalf("Nested directory %s not found in index", archivePath)
-	}
-
-	// Verify files in the nested directory
-	expectedFiles := map[string]bool{
-		"jan.txt": false,
-		"feb.txt": false,
-	}
-
-	for _, file := range archiveInfo.Files {
-		if _, ok := expectedFiles[file.Name]; ok {
-			expectedFiles[file.Name] = true
-		}
-	}
-
-	for fileName, found := range expectedFiles {
-		if !found {
-			t.Errorf("Expected file %s not found in %s", fileName, archivePath)
-		}
+	if err := idx.StartIndexing(); err == nil {
+		t.Fatalf("expected streaming mode error when writer is not configured")
 	}
 }
 
-func TestRefreshAbsolutePath(t *testing.T) {
+func TestStartIndexingStreamsEntries(t *testing.T) {
 	mock := testhelpers.NewMockFileSystem(t)
 	defer mock.Cleanup()
 	mock.CreateStandardTestStructure()
 
-	idx := Initialize("test", mock.Root, mock.Root, true)
+	idx, writer := newStreamingIndex(t, "test", mock.Root, false)
 	if err := idx.StartIndexing(); err != nil {
 		t.Fatalf("StartIndexing failed: %v", err)
 	}
 
-	targetDir := filepath.Join(mock.Root, "documents")
-	newFile := filepath.Join(targetDir, "newdoc.txt")
-	if err := os.WriteFile(newFile, []byte("hello"), 0o644); err != nil {
-		t.Fatalf("write new file: %v", err)
+	if idx.NumDirs == 0 || idx.NumFiles == 0 {
+		t.Fatalf("expected directories and files to be counted, got dirs=%d files=%d", idx.NumDirs, idx.NumFiles)
 	}
 
-	if err := idx.RefreshAbsolutePath(newFile, false); err != nil {
-		t.Fatalf("refresh file: %v", err)
-	}
-
-	dirInfo, ok := idx.Directories["/documents/"]
-	if !ok {
-		t.Fatalf("documents directory missing from index")
-	}
-	if !containsFile(dirInfo.Files, "newdoc.txt") {
-		t.Fatalf("new file not found after refresh")
-	}
-
-	if err := os.Remove(newFile); err != nil {
-		t.Fatalf("remove file: %v", err)
-	}
-	if err := idx.RefreshAbsolutePath(newFile, false); err != nil {
-		t.Fatalf("refresh after delete: %v", err)
-	}
-	dirInfo, ok = idx.Directories["/documents/"]
-	if !ok {
-		t.Fatalf("documents directory missing after delete")
-	}
-	if containsFile(dirInfo.Files, "newdoc.txt") {
-		t.Fatalf("deleted file still present after refresh")
-	}
-
-	nestedDir := filepath.Join(mock.Root, "photos", "newset")
-	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
-		t.Fatalf("mkdir nested: %v", err)
-	}
-	nestedFile := filepath.Join(nestedDir, "image.jpg")
-	if err := os.WriteFile(nestedFile, []byte("data"), 0o644); err != nil {
-		t.Fatalf("write nested file: %v", err)
-	}
-	if err := idx.RefreshAbsolutePath(nestedDir, true); err != nil {
-		t.Fatalf("refresh recursive dir: %v", err)
-	}
-	dirInfo, ok = idx.Directories["/photos/newset/"]
-	if !ok {
-		t.Fatalf("new directory not indexed")
-	}
-	if !containsFile(dirInfo.Files, "image.jpg") {
-		t.Fatalf("nested file missing after recursive refresh")
-	}
-
-	outside := filepath.Join(os.TempDir(), "outside.txt")
-	if err := idx.RefreshAbsolutePath(outside, false); err == nil {
-		t.Fatalf("expected error for path outside root")
-	}
+	entries := writer.entriesByPath()
+	assertHasEntry(t, entries, "/", true)
+	assertHasEntry(t, entries, "/documents", true)
+	assertHasEntry(t, entries, "/documents/readme.txt", false)
+	assertHasEntry(t, entries, "/photos", true)
+	assertHasEntry(t, entries, "/photos/image1.jpg", false)
 }
 
-func containsFile(items []iteminfo.ItemInfo, name string) bool {
-	for _, item := range items {
-		if item.Name == name {
-			return true
-		}
+func TestHiddenFilesControlledByFlag(t *testing.T) {
+	mock := testhelpers.NewMockFileSystem(t)
+	defer mock.Cleanup()
+	mock.CreateStandardTestStructure()
+
+	withHiddenIdx, withHiddenWriter := newStreamingIndex(t, "with-hidden", mock.Root, true)
+	if err := withHiddenIdx.StartIndexing(); err != nil {
+		t.Fatalf("StartIndexing with hidden failed: %v", err)
 	}
-	return false
+
+	withoutHiddenIdx, withoutHiddenWriter := newStreamingIndex(t, "without-hidden", mock.Root, false)
+	if err := withoutHiddenIdx.StartIndexing(); err != nil {
+		t.Fatalf("StartIndexing without hidden failed: %v", err)
+	}
+
+	withHiddenEntries := withHiddenWriter.entriesByPath()
+	withoutHiddenEntries := withoutHiddenWriter.entriesByPath()
+
+	if _, ok := withHiddenEntries["/.config"]; !ok {
+		t.Fatalf("expected hidden root file to be indexed when includeHidden=true")
+	}
+	if _, ok := withoutHiddenEntries["/.config"]; ok {
+		t.Fatalf("hidden file should be skipped when includeHidden=false")
+	}
 }
 
 func TestGetTotalSize(t *testing.T) {
@@ -285,9 +105,8 @@ func TestGetTotalSize(t *testing.T) {
 	mock.CreateFile("file1.txt", "12345")      // 5 bytes
 	mock.CreateFile("file2.txt", "1234567890") // 10 bytes
 
-	idx := Initialize("test", mock.Root, mock.Root, false)
-	err := idx.StartIndexing()
-	if err != nil {
+	idx, _ := newStreamingIndex(t, "test", mock.Root, false)
+	if err := idx.StartIndexing(); err != nil {
 		t.Fatalf("StartIndexing failed: %v", err)
 	}
 
@@ -307,9 +126,8 @@ func TestHardlinks(t *testing.T) {
 	// Create hardlink
 	mock.CreateHardlink("original.txt", "hardlink.txt")
 
-	idx := Initialize("test", mock.Root, mock.Root, false)
-	err := idx.StartIndexing()
-	if err != nil {
+	idx, _ := newStreamingIndex(t, "test", mock.Root, false)
+	if err := idx.StartIndexing(); err != nil {
 		t.Fatalf("StartIndexing failed: %v", err)
 	}
 
@@ -321,90 +139,6 @@ func TestHardlinks(t *testing.T) {
 	// Should track the hardlink
 	if len(idx.FoundHardLinks) == 0 {
 		t.Error("Expected hardlinks to be tracked")
-	}
-}
-
-func TestSearch(t *testing.T) {
-	mock := testhelpers.NewMockFileSystem(t)
-	defer mock.Cleanup()
-
-	mock.CreateStandardTestStructure()
-
-	idx := Initialize("test", mock.Root, mock.Root, false)
-	err := idx.StartIndexing()
-	if err != nil {
-		t.Fatalf("StartIndexing failed: %v", err)
-	}
-
-	tests := []struct {
-		name          string
-		searchTerm    string
-		caseSensitive bool
-		expectMin     int // minimum number of results expected
-		expectMax     int // maximum number of results expected (0 = no max)
-	}{
-		{
-			name:          "case insensitive search for 'txt'",
-			searchTerm:    "txt",
-			caseSensitive: false,
-			expectMin:     5, // readme.txt, notes.txt, old.txt, jan.txt, feb.txt, numbered/*.txt
-		},
-		{
-			name:          "case sensitive search for 'Report'",
-			searchTerm:    "Report",
-			caseSensitive: true,
-			expectMin:     1,
-			expectMax:     1,
-		},
-		{
-			name:          "case insensitive search for 'report'",
-			searchTerm:    "report",
-			caseSensitive: false,
-			expectMin:     1,
-		},
-		{
-			name:          "search for 'image'",
-			searchTerm:    "image",
-			caseSensitive: false,
-			expectMin:     2, // image1.jpg, image2.png
-		},
-		{
-			name:          "search for folder 'documents'",
-			searchTerm:    "documents",
-			caseSensitive: false,
-			expectMin:     1,
-		},
-		{
-			name:          "search for non-existent",
-			searchTerm:    "nonexistent123",
-			caseSensitive: false,
-			expectMin:     0,
-			expectMax:     0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			results := idx.Search(tt.searchTerm, tt.caseSensitive)
-
-			if len(results) < tt.expectMin {
-				t.Errorf("Expected at least %d results, got %d", tt.expectMin, len(results))
-			}
-
-			if tt.expectMax > 0 && len(results) > tt.expectMax {
-				t.Errorf("Expected at most %d results, got %d", tt.expectMax, len(results))
-			}
-
-			// Verify result structure
-			for _, result := range results {
-				if result.Path == "" {
-					t.Error("Result path should not be empty")
-				}
-				if result.Name == "" {
-					t.Error("Result name should not be empty")
-				}
-			}
-		})
 	}
 }
 
@@ -500,5 +234,16 @@ func TestIsHidden(t *testing.T) {
 				t.Errorf("Expected isHidden=%v for %s, got %v", tt.wantHidden, tt.filename, result)
 			}
 		})
+	}
+}
+
+func assertHasEntry(t *testing.T, entries map[string]IndexEntry, path string, isDir bool) {
+	t.Helper()
+	entry, ok := entries[path]
+	if !ok {
+		t.Fatalf("expected entry for %s", path)
+	}
+	if entry.IsDir != isDir {
+		t.Fatalf("entry %s expected IsDir=%v, got %v", path, isDir, entry.IsDir)
 	}
 }

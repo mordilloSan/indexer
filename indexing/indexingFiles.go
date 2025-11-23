@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/mordilloSan/go_logger/logger"
@@ -29,16 +30,12 @@ type ReducedIndex struct {
 	Status          IndexStatus `json:"status"`
 	NumDirs         uint64      `json:"numDirs"`
 	NumFiles        uint64      `json:"numFiles"`
-	NumDeleted      uint64      `json:"numDeleted"`
 	LastIndexed     time.Time   `json:"-"`
 	LastIndexedUnix int64       `json:"lastIndexedUnixTime"`
-	FullScanTime    int         `json:"fullScanDurationSeconds"`
-	Assessment      string      `json:"assessment"`
 }
 
-// DirMetadata is a lightweight structure that tracks only directory size without full file list.
+// DirMetadata stores minimal per-directory metadata; the map key is the path to avoid duplicating it.
 type DirMetadata struct {
-	Path    string
 	Size    int64
 	ModTime time.Time
 	Inode   uint64
@@ -51,29 +48,19 @@ type StreamingWriter interface {
 
 type Index struct {
 	ReducedIndex
-	Name                       string                        // unique name for this index
-	Path                       string                        // filesystem path being indexed
-	Source                     string                        // source identifier
-	includeHidden              bool                          // whether to include hidden files and directories
-	Directories                map[string]*iteminfo.FileInfo `json:"-"` // indexed directories (legacy mode)
-	DirectoriesLedger          map[string]struct{}           `json:"-"` // set of indexed paths
-	FilesChangedDuringIndexing bool                          `json:"-"` // whether files changed during indexing
-	wasIndexed                 bool                          `json:"-"` // whether initial indexing is complete
-	FoundHardLinks             map[string]uint64             `json:"-"` // hardlink path -> size
-	processedInodes            map[uint64]struct{}           `json:"-"` // tracks processed inodes for hardlinks
-	totalSize                  uint64                        `json:"-"` // total size
-	mu                         sync.RWMutex                  `json:"-"` // protects concurrent access
+	Name            string              // unique name for this index
+	Path            string              // filesystem path being indexed
+	Source          string              // source identifier
+	includeHidden   bool                // whether to include hidden files and directories
+	FoundHardLinks  map[string]uint64   `json:"-"` // hardlink path -> size
+	processedInodes map[uint64]struct{} `json:"-"` // tracks processed inodes for hardlinks
+	totalSize       uint64              `json:"-"` // total size
+	mu              sync.RWMutex        `json:"-"` // protects concurrent access
 
 	// Streaming mode fields
-	streamingMode bool                    `json:"-"` // if true, use streaming instead of in-memory
-	streamWriter  StreamingWriter         `json:"-"` // where to send entries in streaming mode
-	dirMetadata   map[string]*DirMetadata `json:"-"` // lightweight dir metadata in streaming mode
+	streamWriter StreamingWriter        `json:"-"` // where to send entries in streaming mode
+	dirMetadata  map[string]DirMetadata `json:"-"` // lightweight dir metadata in streaming mode
 }
-
-var (
-	indexes      map[string]*Index
-	indexesMutex sync.RWMutex
-)
 
 type IndexStatus string
 
@@ -103,36 +90,24 @@ var (
 	externalMountPoints map[string]string
 )
 
-func init() {
-	indexes = make(map[string]*Index)
-}
-
 // Initialize creates a new index for the given path
 // name: a unique name for this index
 // path: the filesystem path to index (e.g., "/", "/home", "/home/user/documents")
 // source: an optional source identifier (can be same as name)
 // includeHidden: whether to include hidden files and directories (starting with .)
 func Initialize(name string, path string, source string, includeHidden bool) *Index {
-	indexesMutex.Lock()
-	defer indexesMutex.Unlock()
-
 	newIndex := &Index{
-		Name:              name,
-		Path:              path,
-		Source:            source,
-		includeHidden:     includeHidden,
-		Directories:       make(map[string]*iteminfo.FileInfo),
-		DirectoriesLedger: make(map[string]struct{}),
-		processedInodes:   make(map[uint64]struct{}),
-		FoundHardLinks:    make(map[string]uint64),
-		streamingMode:     false,
+		Name:            name,
+		Path:            path,
+		Source:          source,
+		includeHidden:   includeHidden,
+		processedInodes: make(map[uint64]struct{}),
+		FoundHardLinks:  make(map[string]uint64),
 	}
 	newIndex.ReducedIndex = ReducedIndex{
-		Status:     READY,
-		IdxName:    name,
-		Assessment: "not indexed",
+		Status:  READY,
+		IdxName: name,
 	}
-	indexes[name] = newIndex
 
 	logger.Infof("initialized index [%s] for path [%s] (includeHidden: %v)", name, path, includeHidden)
 	return newIndex
@@ -144,57 +119,20 @@ func Initialize(name string, path string, source string, includeHidden bool) *In
 func (idx *Index) EnableStreaming(writer StreamingWriter) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-	idx.streamingMode = true
 	idx.streamWriter = writer
-	idx.dirMetadata = make(map[string]*DirMetadata)
-	// Clear the Directories map to save memory
-	idx.Directories = nil
-}
-
-// RefreshAbsolutePath re-indexes a specific filesystem path (file or directory).
-// For files, the containing directory is refreshed.
-func (idx *Index) RefreshAbsolutePath(absPath string, recursive bool) error {
-	if absPath == "" {
-		return fmt.Errorf("path cannot be empty")
-	}
-
-	cleanRoot := filepath.Clean(idx.Path)
-	target, err := filepath.Abs(absPath)
-	if err != nil {
-		return err
-	}
-	if target != cleanRoot && !strings.HasPrefix(target, cleanRoot+string(os.PathSeparator)) {
-		return fmt.Errorf("path %s is outside indexed root %s", target, cleanRoot)
-	}
-
-	info, statErr := os.Stat(target)
-	isDir := statErr == nil && info.IsDir()
-	indexPath := idx.MakeIndexPath(target)
-
-	if statErr != nil {
-		if os.IsNotExist(statErr) {
-			parent := filepath.Dir(target)
-			indexPath = idx.MakeIndexPath(parent)
-			isDir = true
-		} else {
-			return statErr
-		}
-	}
-
-	if !isDir {
-		indexPath = strings.TrimSuffix(indexPath, "/")
-	}
-
-	opts := iteminfo.FileOptions{
-		Path:      indexPath,
-		IsDir:     isDir,
-		Recursive: recursive && isDir,
-	}
-	return idx.RefreshFileInfo(opts)
+	idx.dirMetadata = make(map[string]DirMetadata)
 }
 
 // StartIndexing begins indexing the configured path
 func (idx *Index) StartIndexing() error {
+	idx.mu.RLock()
+	writer := idx.streamWriter
+	idx.mu.RUnlock()
+
+	if writer == nil {
+		return fmt.Errorf("streaming mode is required; call EnableStreaming with a writer before indexing")
+	}
+
 	idx.SetStatus(INDEXING)
 	logger.Infof("starting indexing for [%s] at path [%s]", idx.Name, idx.Path)
 
@@ -204,15 +142,9 @@ func (idx *Index) StartIndexing() error {
 		return err
 	}
 
-	idx.wasIndexed = true
 	idx.SetStatus(READY)
 	logger.Infof("completed indexing for [%s]: %d directories, %d files", idx.Name, idx.NumDirs, idx.NumFiles)
 	return nil
-}
-
-// indexDirectoryWithOptions wraps indexDirectory
-func (idx *Index) indexDirectoryWithOptions(adjustedPath string, recursive bool) error {
-	return idx.indexDirectory(adjustedPath, recursive)
 }
 
 // indexDirectory recursively indexes files and directories
@@ -241,143 +173,42 @@ func (idx *Index) indexDirectory(adjustedPath string, recursive bool) error {
 		return ErrNotIndexed
 	}
 
-	// if indexing, mark the directory as valid and indexed.
-	if recursive {
-		// Prevent race conditions if scanning becomes concurrent in the future.
-		idx.mu.Lock()
-		idx.DirectoriesLedger[adjustedPath] = struct{}{}
-		idx.mu.Unlock()
-	}
 	// adjustedPath is already normalized with trailing slash
 	combinedPath := adjustedPath
-	// Check if directory was modified since last index
-	idx.mu.RLock()
-	modChange := false
-	cachedDir, exists := idx.Directories[adjustedPath]
-	if exists {
-		modChange = dirInfo.ModTime() != cachedDir.ModTime
-	}
-	idx.mu.RUnlock()
-
-	// Track if files changed during indexing
-	if recursive && modChange {
-		idx.mu.Lock()
-		idx.FilesChangedDuringIndexing = true
-		idx.mu.Unlock()
-	}
 	dirFileInfo, err2 := idx.GetDirInfo(dir, dirInfo, realPath, adjustedPath, combinedPath, recursive)
 	if err2 != nil {
 		return err2
 	}
 
-	// Store the directory info in the index
 	idx.mu.Lock()
-	streaming := idx.streamingMode
-	if streaming {
-		// In streaming mode, store only lightweight metadata
-		idx.dirMetadata[adjustedPath] = &DirMetadata{
-			Path:    adjustedPath,
-			Size:    dirFileInfo.Size,
-			ModTime: dirFileInfo.ModTime,
-			Inode:   dirFileInfo.Inode,
-		}
-
-		// Write directory entry to database if recursive
-		if recursive {
-			normalized := normalizeRelativePath(adjustedPath)
-			absDirPath := idx.realPathFromCombined(adjustedPath)
-
-			entry := IndexEntry{
-				RelativePath: normalized,
-				AbsolutePath: absDirPath,
-				Name:         directoryName(dirFileInfo, normalized),
-				Size:         dirFileInfo.Size,
-				ModTime:      dirFileInfo.ModTime,
-				Type:         "directory",
-				Hidden:       dirFileInfo.Hidden,
-				IsDir:        true,
-				Inode:        dirFileInfo.Inode,
-			}
-			idx.mu.Unlock() // Unlock before streaming to avoid deadlock
-			if err := idx.streamWriter.Write(entry); err != nil {
-				logger.Errorf("Failed to stream directory entry: %v", err)
-			}
-			return nil
-		}
-	} else {
-		// Legacy mode: store full FileInfo
-		idx.Directories[adjustedPath] = dirFileInfo
+	idx.dirMetadata[adjustedPath] = DirMetadata{
+		Size:    dirFileInfo.Size,
+		ModTime: dirFileInfo.ModTime,
+		Inode:   dirFileInfo.Inode,
 	}
 	idx.mu.Unlock()
+
+	if recursive {
+		normalized := NormalizeIndexPath(adjustedPath)
+		absDirPath := idx.realPathFromCombined(adjustedPath)
+
+		entry := IndexEntry{
+			RelativePath: normalized,
+			AbsolutePath: absDirPath,
+			Name:         directoryName(dirFileInfo, normalized),
+			Size:         dirFileInfo.Size,
+			ModTime:      dirFileInfo.ModTime,
+			Type:         "directory",
+			Hidden:       dirFileInfo.Hidden,
+			IsDir:        true,
+			Inode:        dirFileInfo.Inode,
+		}
+		if err := idx.streamWriter.Write(entry); err != nil {
+			logger.Errorf("Failed to stream directory entry: %v", err)
+		}
+		return nil
+	}
 	return nil
-}
-
-func (idx *Index) GetFsDirInfo(adjustedPath string) (*iteminfo.FileInfo, error) {
-	realPath, isDir, err := idx.GetRealPath(adjustedPath)
-	if err != nil {
-		return nil, err
-	}
-	originalPath := realPath
-
-	dir, err := os.Open(realPath)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = dir.Close() }()
-
-	dirInfo, err := dir.Stat()
-	if err != nil {
-		return nil, err
-	}
-
-	if !dirInfo.IsDir() {
-		fileInfo := iteminfo.FileInfo{
-			Path: adjustedPath,
-			ItemInfo: iteminfo.ItemInfo{
-				Name:    filepath.Base(originalPath),
-				Size:    dirInfo.Size(),
-				ModTime: dirInfo.ModTime(),
-				Type:    "file",
-			},
-		}
-
-		return &fileInfo, nil
-	}
-
-	// Normalize directory path to always have trailing slash
-	if adjustedPath != "/" {
-		adjustedPath = strings.TrimSuffix(adjustedPath, "/") + "/"
-	}
-	// adjustedPath is already normalized with trailing slash
-	combinedPath := adjustedPath
-	var response *iteminfo.FileInfo
-	response, err = idx.GetDirInfo(dir, dirInfo, realPath, adjustedPath, combinedPath, false)
-	if err != nil {
-		return nil, err
-	}
-	if !isDir {
-		baseName := filepath.Base(originalPath)
-		idx.MakeIndexPath(realPath)
-		found := false
-		for _, item := range response.Files {
-			if item.Name == baseName {
-				// Clean path to remove trailing slashes before joining
-				filePath := strings.TrimSuffix(adjustedPath, "/") + "/" + item.Name
-				response = &iteminfo.FileInfo{
-					Path:     filePath,
-					ItemInfo: item,
-				}
-				found = true
-				continue
-			}
-		}
-		if !found {
-			return nil, fmt.Errorf("file not found in directory: %s", adjustedPath)
-		}
-
-	}
-	return response, nil
-
 }
 
 func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjustedPath, combinedPath string, recursive bool) (*iteminfo.FileInfo, error) {
@@ -388,84 +219,51 @@ func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjus
 	if err != nil {
 		return nil, err
 	}
+
 	var totalSize int64
-	fileInfos := []iteminfo.ItemInfo{}
-	dirInfos := []iteminfo.ItemInfo{}
+	dirHidden := isHidden(stat)
+	dirInode := inodeFromFileInfo(stat)
 
-	// Check if we're in streaming mode
-	idx.mu.RLock()
-	streaming := idx.streamingMode
-	idx.mu.RUnlock()
-
-	// Process each file and directory in the current directory
 	for _, file := range files {
 		hidden := isHidden(file)
 		isDir := iteminfo.IsDirectory(file)
 		baseName := file.Name()
 		fullCombined := combinedPath + baseName
-		// Skip items based on simple rules (hidden files, system directories)
 		if idx.shouldSkip(isDir, hidden, fullCombined) {
 			continue
 		}
-		itemInfo := &iteminfo.ItemInfo{
-			Name:    file.Name(),
-			ModTime: file.ModTime(),
-			Hidden:  hidden,
-		}
-		itemInfo.Inode = inodeFromFileInfo(file)
 
 		if isDir {
-			dirPath := combinedPath + file.Name()
-			dirMapKey := normalizeIndexPath(dirPath)
+			dirPath := combinedPath + baseName
+			dirMapKey := NormalizeIndexPath(dirPath)
 
 			if recursive {
-				// Recursively index the subdirectory
-				err = idx.indexDirectory(dirPath, recursive)
-				if err != nil {
+				if err := idx.indexDirectory(dirPath, recursive); err != nil {
 					logger.Debugf("Failed to %v", err)
 					continue
 				}
 			}
 
-			// Get the size from the indexed directory
-			if streaming {
-				idx.mu.RLock()
-				if meta, exists := idx.dirMetadata[dirMapKey]; exists {
-					itemInfo.Size = meta.Size
-					itemInfo.Inode = meta.Inode
-				}
-				idx.mu.RUnlock()
-			} else {
-				idx.mu.RLock()
-				if realDirInfo, exists := idx.Directories[dirMapKey]; exists {
-					itemInfo.Size = realDirInfo.Size
-					itemInfo.Inode = realDirInfo.Inode
-				}
-				idx.mu.RUnlock()
+			idx.mu.RLock()
+			if meta, exists := idx.dirMetadata[dirMapKey]; exists {
+				totalSize += meta.Size
 			}
+			idx.mu.RUnlock()
 
-			totalSize += itemInfo.Size
-			itemInfo.Type = "directory"
-			dirInfos = append(dirInfos, *itemInfo)
 			if recursive {
 				idx.NumDirs++
 			}
 		} else {
 			size, shouldCountSize := idx.handleFile(file, fullCombined)
-			itemInfo.Type = "file"
-			itemInfo.Size = int64(size)
-
-			fileInfos = append(fileInfos, *itemInfo)
 			if shouldCountSize {
-				totalSize += itemInfo.Size
+				totalSize += int64(size)
 			}
 			if recursive {
 				idx.NumFiles++
 			}
 
-			// In streaming mode, write file immediately to database
-			if streaming && recursive {
-				normalized := normalizeRelativePath(adjustedPath)
+			if recursive {
+				normalized := NormalizeIndexPath(adjustedPath)
 				childPath := makeChildRelativePath(normalized, baseName)
 				absPath := filepath.Join(realPath, baseName)
 
@@ -473,12 +271,12 @@ func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjus
 					RelativePath: childPath,
 					AbsolutePath: absPath,
 					Name:         baseName,
-					Size:         itemInfo.Size,
-					ModTime:      itemInfo.ModTime,
+					Size:         int64(size),
+					ModTime:      file.ModTime(),
 					Type:         "file",
 					Hidden:       hidden,
 					IsDir:        false,
-					Inode:        itemInfo.Inode,
+					Inode:        inodeFromFileInfo(file),
 				}
 				if err := idx.streamWriter.Write(entry); err != nil {
 					logger.Errorf("Failed to stream file entry: %v", err)
@@ -487,125 +285,30 @@ func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjus
 		}
 	}
 
-	// Optionally skip empty folders
-	// if totalSize == 0 {
-	// 	return nil, ErrNotIndexed
-	// }
-
 	if adjustedPath == "/" {
 		idx.mu.Lock()
 		idx.DiskUsed = uint64(totalSize)
 		idx.mu.Unlock()
 	}
 
-	// Create FileInfo for the current directory (adjustedPath is already normalized with trailing slash)
 	dirFileInfo := &iteminfo.FileInfo{
-		Path:    adjustedPath,
-		Files:   fileInfos,
-		Folders: dirInfos,
+		Path: adjustedPath,
 	}
 	dirFileInfo.ItemInfo = iteminfo.ItemInfo{
-		Name:    filepath.Base(dirInfo.Name()),
+		Name:    filepath.Base(stat.Name()),
 		Type:    "directory",
 		Size:    totalSize,
 		ModTime: stat.ModTime(),
-		Inode:   inodeFromFileInfo(stat),
+		Inode:   dirInode,
+		Hidden:  dirHidden,
 	}
-	dirFileInfo.SortItems()
-
-	// Metadata will be updated by the caller (indexDirectory or GetFsDirInfo)
 	return dirFileInfo, nil
-}
-
-func (idx *Index) recursiveUpdateDirSizes(childInfo *iteminfo.FileInfo, previousSize int64) {
-	// Calculate the size delta once at the start
-	sizeDelta := childInfo.Size - previousSize
-	if sizeDelta == 0 {
-		return
-	}
-
-	// Iteratively walk up the directory tree, updating each parent's size
-	currentPath := childInfo.Path
-	for {
-		parentDir := iteminfo.GetParentDirectoryPath(currentPath)
-		if parentDir == "" {
-			break
-		}
-
-		// Lock, update, unlock for each parent
-		idx.mu.Lock()
-		parentInfo, exists := idx.Directories[parentDir]
-		if !exists {
-			idx.mu.Unlock()
-			break
-		}
-
-		// Update parent size with the delta
-		parentInfo.Size += sizeDelta
-		idx.Directories[parentDir] = parentInfo
-		idx.mu.Unlock()
-
-		// Move up to the next parent
-		currentPath = parentDir
-	}
-}
-
-func (idx *Index) GetRealPath(relativePath ...string) (string, bool, error) {
-	combined := append([]string{idx.Path}, relativePath...)
-	joinedPath := filepath.Join(combined...)
-
-	absolutePath, err := filepath.Abs(joinedPath)
-	if err != nil {
-		return absolutePath, false, fmt.Errorf("could not get real path: %v, %s", joinedPath, err)
-	}
-
-	// Resolve symlinks and get the real path
-	return iteminfo.ResolveSymlinks(absolutePath)
-}
-
-func (idx *Index) RefreshFileInfo(opts iteminfo.FileOptions) error {
-	targetPath := opts.Path
-	if !opts.IsDir {
-		targetPath = idx.MakeIndexPath(filepath.Dir(targetPath))
-	}
-
-	// Get PREVIOUS size BEFORE indexing
-	var previousSize int64
-	idx.mu.RLock()
-	if previousInfo, exists := idx.Directories[targetPath]; exists {
-		previousSize = previousInfo.Size
-	}
-	idx.mu.RUnlock()
-
-	// Re-index the directory
-	err := idx.indexDirectoryWithOptions(targetPath, opts.Recursive)
-	if err != nil {
-		return err
-	}
-
-	// Get the NEW size after indexing
-	idx.mu.RLock()
-	newInfo, exists := idx.Directories[targetPath]
-	idx.mu.RUnlock()
-
-	if !exists {
-		return fmt.Errorf("file/folder does not exist: %s", targetPath)
-	}
-
-	// If size changed, propagate to parents
-	if previousSize != newInfo.Size {
-		idx.recursiveUpdateDirSizes(newInfo, previousSize)
-	}
-
-	return nil
 }
 
 func isHidden(file os.FileInfo) bool {
 	// Check if the file starts with a dot (Linux hidden files)
-	if file.Name()[0] == '.' {
-		return true
-	}
-	return false
+	name := file.Name()
+	return len(name) > 0 && name[0] == '.'
 }
 
 func (idx *Index) shouldSkip(isDir bool, isHidden bool, fullCombined string) bool {
@@ -633,17 +336,6 @@ func (idx *Index) shouldSkip(isDir bool, isHidden bool, fullCombined string) boo
 	return false
 }
 
-type DiskUsage struct {
-	Total uint64 `json:"total"`
-	Used  uint64 `json:"used"`
-}
-
-func (idx *Index) SetUsage(totalBytes uint64) {
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
-	idx.DiskTotal = totalBytes
-}
-
 func (idx *Index) SetStatus(status IndexStatus) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
@@ -660,30 +352,10 @@ func (idx *Index) GetTotalSize() uint64 {
 // This helps reduce memory usage, especially for large filesystem scans.
 func (idx *Index) Cleanup() {
 	idx.mu.Lock()
-
-	// Clear hardlink tracking maps (only needed during indexing)
-	idx.processedInodes = make(map[uint64]struct{})
-	idx.FoundHardLinks = make(map[string]uint64)
-
-	// In streaming mode, clear directory metadata (already persisted to DB)
-	if idx.streamingMode {
-		idx.dirMetadata = make(map[string]*DirMetadata)
-	} else {
-		// In non-streaming mode, clear the Directories map
-		// (data is already persisted to DB or memory)
-		idx.Directories = make(map[string]*iteminfo.FileInfo)
-	}
-
-	// Clear the ledger as well
-	idx.DirectoriesLedger = make(map[string]struct{})
-
-	name := idx.Name
+	idx.processedInodes = nil
+	idx.FoundHardLinks = nil
+	idx.dirMetadata = nil
 	idx.mu.Unlock()
-
-	// Remove this index from the global map - it's never read and wastes memory
-	indexesMutex.Lock()
-	delete(indexes, name)
-	indexesMutex.Unlock()
 }
 
 func (idx *Index) isLinuxSystemPath(fullCombined string) bool {
@@ -826,64 +498,6 @@ func isExternalFilesystem(fsType, source string) bool {
 	return false
 }
 
-// SearchResult represents a search match
-type SearchResult struct {
-	Path  string // full path to the file/folder
-	Name  string // name of the file/folder
-	Size  int64  // size in bytes
-	IsDir bool   // whether it's a directory
-}
-
-// Search finds all files and folders matching the search term
-func (idx *Index) Search(searchTerm string, caseSensitive bool) []SearchResult {
-	searchOpts := iteminfo.SearchOptions{
-		CaseSensitive: caseSensitive,
-		Terms:         []string{searchTerm},
-	}
-
-	results := []SearchResult{}
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-
-	for path, dirInfo := range idx.Directories {
-		// Search in files
-		for _, file := range dirInfo.Files {
-			if file.ContainsSearchTerm(searchTerm, searchOpts) {
-				fullPath := path
-				if !strings.HasSuffix(fullPath, "/") {
-					fullPath += "/"
-				}
-				fullPath += file.Name
-				results = append(results, SearchResult{
-					Path:  fullPath,
-					Name:  file.Name,
-					Size:  file.Size,
-					IsDir: false,
-				})
-			}
-		}
-
-		// Search in folders
-		for _, folder := range dirInfo.Folders {
-			if folder.ContainsSearchTerm(searchTerm, searchOpts) {
-				fullPath := path
-				if !strings.HasSuffix(fullPath, "/") {
-					fullPath += "/"
-				}
-				fullPath += folder.Name
-				results = append(results, SearchResult{
-					Path:  fullPath,
-					Name:  folder.Name,
-					Size:  folder.Size,
-					IsDir: true,
-				})
-			}
-		}
-	}
-
-	return results
-}
-
 func (idx *Index) handleFile(file os.FileInfo, fullCombined string) (size uint64, shouldCountSize bool) {
 	var realSize uint64
 	var nlink uint64 = 1
@@ -900,18 +514,16 @@ func (idx *Index) handleFile(file os.FileInfo, fullCombined string) (size uint64
 	}
 
 	if nlink > 1 {
-		// It's a hard link
 		idx.mu.Lock()
-		defer idx.mu.Unlock()
 		if _, exists := idx.processedInodes[ino]; exists {
-			// Already seen, don't count towards global total, or directory total.
+			idx.mu.Unlock()
 			return realSize, false
 		}
-		// First time seeing this inode.
 		idx.processedInodes[ino] = struct{}{}
 		idx.FoundHardLinks[fullCombined] = realSize
 		idx.totalSize += realSize
-		return realSize, true // Count size for directory total.
+		idx.mu.Unlock()
+		return realSize, true
 	}
 
 	// It's a regular file.
@@ -919,17 +531,6 @@ func (idx *Index) handleFile(file os.FileInfo, fullCombined string) (size uint64
 	idx.totalSize += realSize
 	idx.mu.Unlock()
 	return realSize, true // Count size.
-}
-
-// input should be non-index path.
-func (idx *Index) MakeIndexPath(path string) string {
-	if path == "." || strings.HasPrefix(path, "./") {
-		path = strings.TrimPrefix(path, ".")
-	}
-	path = strings.TrimPrefix(path, idx.Path)
-	path = idx.MakeIndexPathPlatform(path)
-	path = strings.TrimSuffix(path, "/") + "/"
-	return path
 }
 
 func inodeFromFileInfo(info os.FileInfo) uint64 {
@@ -943,13 +544,11 @@ func inodeFromFileInfo(info os.FileInfo) uint64 {
 	return 0
 }
 
-func normalizeIndexPath(path string) string {
-	if path == "" || path == "/" {
-		return "/"
+func getFileDetails(sys any) (uint64, uint64, uint64, bool) {
+	if stat, ok := sys.(*syscall.Stat_t); ok {
+		// Use allocated size for `du`-like behavior
+		realSize := uint64(stat.Blocks * 512)
+		return realSize, uint64(stat.Nlink), stat.Ino, true
 	}
-	path = strings.TrimSuffix(path, "/") + "/"
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	return path
+	return 0, 1, 0, false
 }

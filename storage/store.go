@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/mordilloSan/go_logger/logger"
+
+	"indexer/indexing"
 )
 
 // Store wraps the database connection
@@ -144,7 +146,7 @@ func (s *Store) UpsertEntry(indexID int64, entry EntryResult, absPath, typ strin
 			hidden=excluded.hidden,
 			is_dir=excluded.is_dir,
 			inode=excluded.inode;
-	`, indexID, entry.Path, absPath, entry.Name, entry.Size, entry.ModTime.Unix(), typ, boolToInt(hidden), boolToInt(entry.IsDir), entry.Inode)
+	`, indexID, entry.Path, absPath, entry.Name, entry.Size, entry.ModTime.Unix(), typ, indexing.BoolToInt(hidden), indexing.BoolToInt(entry.IsDir), entry.Inode)
 	return err
 }
 
