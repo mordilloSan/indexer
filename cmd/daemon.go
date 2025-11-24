@@ -53,7 +53,9 @@ func NewDaemon(cfg DaemonConfig) (*daemon, error) {
 		}
 		cfg.IndexName = name
 	}
-	if cfg.SocketPath == "" {
+	if cfg.SocketPath == "-" {
+		cfg.SocketPath = ""
+	} else if cfg.SocketPath == "" {
 		cfg.SocketPath = "/var/run/indexer.sock"
 	}
 	if cfg.DBPath == "" {
@@ -82,7 +84,7 @@ func NewDaemon(cfg DaemonConfig) (*daemon, error) {
 	return &daemon{
 		cfg:   cfg,
 		db:    db,
-		store: storage.NewStoreWithDB(db),
+		store: storage.NewStoreWithDB(db, cfg.DBPath),
 	}, nil
 }
 
@@ -384,7 +386,18 @@ func (d *daemon) runIndexSubprocess(ctx context.Context) error {
 	logger.Infof("Starting index process")
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("index subprocess failed: %w", err)
+		systemdErr := err
+		logger.Warnf("systemd-run failed (%v); falling back to direct execution", systemdErr)
+
+		fallbackCmd := exec.CommandContext(ctx, os.Args[0], args...)
+		fallbackCmd.Stdout = os.Stdout
+		fallbackCmd.Stderr = os.Stderr
+
+		if err := fallbackCmd.Run(); err != nil {
+			return fmt.Errorf("index subprocess failed after fallback: %w (systemd-run error: %v)", err, systemdErr)
+		}
+		logger.Infof("Index process completed successfully (direct execution fallback)")
+		return nil
 	}
 
 	logger.Infof("Index process completed successfully")
@@ -562,43 +575,61 @@ func prepareIndexRecord(ctx context.Context, db *sql.DB, indexName, indexPath st
 
 func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	var stats struct {
-		Status      string `json:"status"`
-		NumDirs     int64  `json:"num_dirs"`
-		NumFiles    int64  `json:"num_files"`
-		TotalSize   int64  `json:"total_size"`
-		LastIndexed string `json:"last_indexed"`
-	}
-	if d.running.Load() {
-		stats.Status = "running"
-	} else {
-		stats.Status = "idle"
+
+	// Response shape (backwards-compatible + extra stats)
+	var resp struct {
+		Status       string `json:"status"`
+		NumDirs      int64  `json:"num_dirs"`
+		NumFiles     int64  `json:"num_files"`
+		TotalSize    int64  `json:"total_size"`
+		LastIndexed  string `json:"last_indexed"`
+		TotalIndexes int    `json:"total_indexes"`
+		TotalEntries int64  `json:"total_entries"`
+		DatabaseSize int64  `json:"database_size"`
 	}
 
-	// Get database statistics from the most recent index
+	if d.running.Load() {
+		resp.Status = "running"
+	} else {
+		resp.Status = "idle"
+	}
+
+	// 1) Per-latest-index stats (dirs/files/size/last_indexed)
 	li, err := loadLatestIndex(ctx, d.db)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		// no data yet; keep defaults
+		// No prior index: leave NumDirs/NumFiles/TotalSize/LastIndexed as zero values
 	case err != nil:
 		http.Error(w, fmt.Sprintf("error loading status: %v", err), http.StatusInternalServerError)
 		return
 	default:
-		stats.NumDirs = li.NumDirs
-		stats.NumFiles = li.NumFiles
-		stats.TotalSize = li.TotalSize
+		resp.NumDirs = li.NumDirs
+		resp.NumFiles = li.NumFiles
+		resp.TotalSize = li.TotalSize
 		if li.LastIndexed.Valid && li.LastIndexed.Int64 > 0 {
-			stats.LastIndexed = time.Unix(li.LastIndexed.Int64, 0).UTC().Format(time.RFC3339)
+			resp.LastIndexed = time.Unix(li.LastIndexed.Int64, 0).UTC().Format(time.RFC3339)
 		}
 	}
 
-	writeJSON(w, stats)
+	// 2) Global stats (uses Store with correct dbPath for db size)
+	stats, err := d.store.GetStats(ctx)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("error loading stats: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	resp.TotalIndexes = stats.TotalIndexes
+	resp.TotalEntries = stats.TotalEntries
+	resp.DatabaseSize = stats.DatabaseSize
+
+	writeJSON(w, resp)
 }
 
 func (d *daemon) handleSearch(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	limit := queryInt(r.URL.Query().Get("limit"), 100, 1)
-	results, err := d.store.SearchEntries(q, limit)
+	results, err := d.store.SearchEntries(ctx, q, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -607,12 +638,13 @@ func (d *daemon) handleSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *daemon) handleEntries(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	path := queryPathOrRoot(r.URL.Query().Get("path"))
 	recursive := r.URL.Query().Get("recursive") == "true"
 	limit := queryInt(r.URL.Query().Get("limit"), 200, 1)
 	offset := queryInt(r.URL.Query().Get("offset"), 0, 0)
 
-	results, err := d.store.QueryPath(path, recursive, limit, offset)
+	results, err := d.store.QueryPath(ctx, path, recursive, limit, offset)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -622,7 +654,7 @@ func (d *daemon) handleEntries(w http.ResponseWriter, r *http.Request) {
 
 func (d *daemon) handleDirSize(w http.ResponseWriter, r *http.Request) {
 	path := queryPathOrRoot(r.URL.Query().Get("path"))
-	total, err := d.store.DirSize(path)
+	total, err := d.store.DirSize(r.Context(), path)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

@@ -136,19 +136,28 @@ func (idx *Index) StartIndexing() error {
 	idx.SetStatus(INDEXING)
 	logger.Infof("starting indexing for [%s] at path [%s]", idx.Name, idx.Path)
 
-	err := idx.indexDirectory("/", true)
+	err := idx.indexDirectory("/")
 	if err != nil {
 		idx.SetStatus(UNAVAILABLE)
 		return err
 	}
 
 	idx.SetStatus(READY)
-	logger.Infof("completed indexing for [%s]: %d directories, %d files", idx.Name, idx.NumDirs, idx.NumFiles)
+	idx.mu.RLock()
+	dirs := idx.NumDirs
+	files := idx.NumFiles
+	idx.mu.RUnlock()
+	logger.Infof("completed indexing for [%s]: %d directories, %d files", idx.Name, dirs, files)
 	return nil
 }
 
+// dirMetadataKey normalizes directory paths to the format used as keys in dirMetadata.
+func dirMetadataKey(path string) string {
+	return NormalizeIndexPath(path)
+}
+
 // indexDirectory recursively indexes files and directories
-func (idx *Index) indexDirectory(adjustedPath string, recursive bool) error {
+func (idx *Index) indexDirectory(adjustedPath string) error {
 	// Normalize path to always have trailing slash (except for root which is just "/")
 	if adjustedPath != "/" {
 		adjustedPath = strings.TrimSuffix(adjustedPath, "/") + "/"
@@ -173,47 +182,43 @@ func (idx *Index) indexDirectory(adjustedPath string, recursive bool) error {
 		return ErrNotIndexed
 	}
 
-	// adjustedPath is already normalized with trailing slash
-	combinedPath := adjustedPath
-	dirFileInfo, err2 := idx.GetDirInfo(dir, dirInfo, realPath, adjustedPath, combinedPath, recursive)
+	dirFileInfo, err2 := idx.GetDirInfo(dir, dirInfo, realPath, adjustedPath)
 	if err2 != nil {
 		return err2
 	}
 
 	idx.mu.Lock()
-	idx.dirMetadata[adjustedPath] = DirMetadata{
+	dirKey := dirMetadataKey(adjustedPath)
+	idx.dirMetadata[dirKey] = DirMetadata{
 		Size:    dirFileInfo.Size,
 		ModTime: dirFileInfo.ModTime,
 		Inode:   dirFileInfo.Inode,
 	}
 	idx.mu.Unlock()
 
-	if recursive {
-		normalized := NormalizeIndexPath(adjustedPath)
-		absDirPath := idx.realPathFromCombined(adjustedPath)
+	normalized := dirKey
+	absDirPath := idx.realPathFromCombined(adjustedPath)
 
-		entry := IndexEntry{
-			RelativePath: normalized,
-			AbsolutePath: absDirPath,
-			Name:         directoryName(dirFileInfo, normalized),
-			Size:         dirFileInfo.Size,
-			ModTime:      dirFileInfo.ModTime,
-			Type:         "directory",
-			Hidden:       dirFileInfo.Hidden,
-			IsDir:        true,
-			Inode:        dirFileInfo.Inode,
-		}
-		if err := idx.streamWriter.Write(entry); err != nil {
-			logger.Errorf("Failed to stream directory entry: %v", err)
-		}
-		return nil
+	entry := IndexEntry{
+		RelativePath: normalized,
+		AbsolutePath: absDirPath,
+		Name:         directoryName(dirFileInfo, normalized),
+		Size:         dirFileInfo.Size,
+		ModTime:      dirFileInfo.ModTime,
+		Type:         "directory",
+		Hidden:       dirFileInfo.Hidden,
+		IsDir:        true,
+		Inode:        dirFileInfo.Inode,
+	}
+	if err := idx.streamWriter.Write(entry); err != nil {
+		logger.Errorf("Failed to stream directory entry: %v", err)
 	}
 	return nil
 }
 
-func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjustedPath, combinedPath string, recursive bool) (*iteminfo.FileInfo, error) {
+func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjustedPath string) (*iteminfo.FileInfo, error) {
 	// Ensure combinedPath has exactly one trailing slash to prevent double slashes in subdirectory paths
-	combinedPath = strings.TrimRight(combinedPath, "/") + "/"
+	combinedPath := strings.TrimRight(adjustedPath, "/") + "/"
 	// Read directory contents
 	files, err := dirInfo.Readdir(-1)
 	if err != nil {
@@ -223,6 +228,7 @@ func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjus
 	var totalSize int64
 	dirHidden := isHidden(stat)
 	dirInode := inodeFromFileInfo(stat)
+	normalizedDir := dirMetadataKey(adjustedPath)
 
 	for _, file := range files {
 		hidden := isHidden(file)
@@ -235,13 +241,11 @@ func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjus
 
 		if isDir {
 			dirPath := combinedPath + baseName
-			dirMapKey := NormalizeIndexPath(dirPath)
+			dirMapKey := dirMetadataKey(dirPath)
 
-			if recursive {
-				if err := idx.indexDirectory(dirPath, recursive); err != nil {
-					logger.Debugf("Failed to %v", err)
-					continue
-				}
+			if err := idx.indexDirectory(dirPath); err != nil {
+				logger.Debugf("Failed to %v", err)
+				continue
 			}
 
 			idx.mu.Lock()
@@ -251,37 +255,30 @@ func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjus
 			}
 			idx.mu.Unlock()
 
-			if recursive {
-				idx.NumDirs++
-			}
+			idx.incrementDirCount()
 		} else {
 			size, shouldCountSize := idx.handleFile(file, fullCombined)
 			if shouldCountSize {
 				totalSize += int64(size)
 			}
-			if recursive {
-				idx.NumFiles++
+			idx.incrementFileCount()
+
+			childPath := makeChildRelativePath(normalizedDir, baseName)
+			absPath := filepath.Join(realPath, baseName)
+
+			entry := IndexEntry{
+				RelativePath: childPath,
+				AbsolutePath: absPath,
+				Name:         baseName,
+				Size:         int64(size),
+				ModTime:      file.ModTime(),
+				Type:         "file",
+				Hidden:       hidden,
+				IsDir:        false,
+				Inode:        inodeFromFileInfo(file),
 			}
-
-			if recursive {
-				normalized := NormalizeIndexPath(adjustedPath)
-				childPath := makeChildRelativePath(normalized, baseName)
-				absPath := filepath.Join(realPath, baseName)
-
-				entry := IndexEntry{
-					RelativePath: childPath,
-					AbsolutePath: absPath,
-					Name:         baseName,
-					Size:         int64(size),
-					ModTime:      file.ModTime(),
-					Type:         "file",
-					Hidden:       hidden,
-					IsDir:        false,
-					Inode:        inodeFromFileInfo(file),
-				}
-				if err := idx.streamWriter.Write(entry); err != nil {
-					logger.Errorf("Failed to stream file entry: %v", err)
-				}
+			if err := idx.streamWriter.Write(entry); err != nil {
+				logger.Errorf("Failed to stream file entry: %v", err)
 			}
 		}
 	}
@@ -533,6 +530,18 @@ func (idx *Index) handleFile(file os.FileInfo, fullCombined string) (size uint64
 	idx.totalSize += realSize
 	idx.mu.Unlock()
 	return realSize, true // Count size.
+}
+
+func (idx *Index) incrementDirCount() {
+	idx.mu.Lock()
+	idx.NumDirs++
+	idx.mu.Unlock()
+}
+
+func (idx *Index) incrementFileCount() {
+	idx.mu.Lock()
+	idx.NumFiles++
+	idx.mu.Unlock()
 }
 
 func inodeFromFileInfo(info os.FileInfo) uint64 {

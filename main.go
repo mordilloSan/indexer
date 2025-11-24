@@ -47,6 +47,9 @@ func main() {
 
 	// Otherwise, run daemon normally
 	socketVal := coalesce(*socketPath, "/var/run/indexer.sock")
+	if *socketPath == "-" {
+		socketVal = "-"
+	}
 	listenVal := *listenAddr
 
 	interval, err := parseInterval(*reindexInterval)

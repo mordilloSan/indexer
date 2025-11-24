@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -14,24 +15,26 @@ import (
 
 // Store wraps the database connection
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	dbPath string
 }
 
-// NewStore creates a new Store instance
+// NewStore creates a new Store instance and owns the DB handle.
 func NewStore(dbPath string) (*Store, error) {
 	db, err := Open(dbPath)
 	if err != nil {
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, dbPath: dbPath}, nil
 }
 
 // NewStoreWithDB reuses an existing database handle (e.g., long-lived server).
-func NewStoreWithDB(db *sql.DB) *Store {
-	return &Store{db: db}
+// dbPath should be the actual SQLite file path (for stats / size reporting).
+func NewStoreWithDB(db *sql.DB, dbPath string) *Store {
+	return &Store{db: db, dbPath: dbPath}
 }
 
-// Close closes the database connection
+// Close closes the database connection (only use if Store owns the DB).
 func (s *Store) Close() error {
 	return s.db.Close()
 }
@@ -41,14 +44,25 @@ func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
-// LatestIndexID returns the ID of the most recently indexed index
+// LatestIndexID returns the ID of the most recently indexed index.
+// - sql.ErrNoRows means "no indexes yet"
+// - Any other error is a real DB problem and should be surfaced.
 func (s *Store) LatestIndexID(ctx context.Context) (int64, error) {
-	var id int64
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM indexes ORDER BY last_indexed DESC LIMIT 1`).Scan(&id)
-	if err == sql.ErrNoRows {
-		return 0, fmt.Errorf("no indexes found")
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	return id, err
+
+	var id int64
+	err := s.db.QueryRowContext(ctx, `
+        SELECT id
+        FROM indexes
+        ORDER BY last_indexed DESC
+        LIMIT 1
+    `).Scan(&id)
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 // EntryResult represents a query result entry
@@ -65,24 +79,30 @@ type EntryResult struct {
 }
 
 // SearchEntries performs a name search against the latest index.
-func (s *Store) SearchEntries(pattern string, limit int) ([]EntryResult, error) {
-	ctx := context.Background()
+func (s *Store) SearchEntries(ctx context.Context, pattern string, limit int) ([]EntryResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if limit <= 0 {
 		limit = 100
 	}
 
 	indexID, err := s.LatestIndexID(ctx)
 	if err != nil {
-		return []EntryResult{}, nil
+		if errors.Is(err, sql.ErrNoRows) {
+			// No index yet → no results, not an error
+			return []EntryResult{}, nil
+		}
+		return nil, fmt.Errorf("failed to get latest index: %w", err)
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT relative_path, name, is_dir, size, mod_time, inode
-		FROM entries
-		WHERE index_id = ? AND name LIKE ?
-		ORDER BY mod_time DESC
-		LIMIT ?
-	`, indexID, "%"+pattern+"%", limit)
+        SELECT relative_path, name, is_dir, size, mod_time, inode
+        FROM entries
+        WHERE index_id = ? AND name LIKE ?
+        ORDER BY mod_time DESC
+        LIMIT ?
+    `, indexID, "%"+pattern+"%", limit)
 	if err != nil {
 		return nil, fmt.Errorf("search failed: %w", err)
 	}
@@ -108,19 +128,25 @@ func (s *Store) SearchEntries(pattern string, limit int) ([]EntryResult, error) 
 }
 
 // DirSize aggregates total size under the given path (inclusive).
-func (s *Store) DirSize(path string) (int64, error) {
-	ctx := context.Background()
+func (s *Store) DirSize(ctx context.Context, path string) (int64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	indexID, err := s.LatestIndexID(ctx)
 	if err != nil {
-		return 0, nil
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil // no index yet
+		}
+		return 0, fmt.Errorf("failed to get latest index: %w", err)
 	}
 
 	var total sql.NullInt64
 	if err := s.db.QueryRowContext(ctx, `
-		SELECT SUM(size)
-		FROM entries
-		WHERE index_id = ? AND (relative_path = ? OR relative_path LIKE ?)
-	`, indexID, path, path+"%").Scan(&total); err != nil {
+        SELECT SUM(size)
+        FROM entries
+        WHERE index_id = ? AND (relative_path = ? OR relative_path LIKE ?)
+    `, indexID, path, path+"%").Scan(&total); err != nil {
 		return 0, fmt.Errorf("dir size query failed: %w", err)
 	}
 	if total.Valid {
@@ -134,48 +160,54 @@ func (s *Store) DirSize(path string) (int64, error) {
 func (s *Store) UpsertEntry(indexID int64, entry EntryResult, absPath, typ string, hidden bool) error {
 	ctx := context.Background()
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO entries (
-			index_id, relative_path, absolute_path, name, size, mod_time, type, hidden, is_dir, inode
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(index_id, relative_path) DO UPDATE SET
-			absolute_path=excluded.absolute_path,
-			name=excluded.name,
-			size=excluded.size,
-			mod_time=excluded.mod_time,
-			type=excluded.type,
-			hidden=excluded.hidden,
-			is_dir=excluded.is_dir,
-			inode=excluded.inode;
-	`, indexID, entry.Path, absPath, entry.Name, entry.Size, entry.ModTime.Unix(), typ, indexing.BoolToInt(hidden), indexing.BoolToInt(entry.IsDir), entry.Inode)
+        INSERT INTO entries (
+            index_id, relative_path, absolute_path, name, size, mod_time, type, hidden, is_dir, inode
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(index_id, relative_path) DO UPDATE SET
+            absolute_path=excluded.absolute_path,
+            name=excluded.name,
+            size=excluded.size,
+            mod_time=excluded.mod_time,
+            type=excluded.type,
+            hidden=excluded.hidden,
+            is_dir=excluded.is_dir,
+            inode=excluded.inode;
+    `, indexID, entry.Path, absPath, entry.Name, entry.Size, entry.ModTime.Unix(), typ, indexing.BoolToInt(hidden), indexing.BoolToInt(entry.IsDir), entry.Inode)
 	return err
 }
 
 // QueryPath queries entries at or under a given path
-func (s *Store) QueryPath(path string, recursive bool, limit, offset int) ([]EntryResult, error) {
-	ctx := context.Background()
+func (s *Store) QueryPath(ctx context.Context, path string, recursive bool, limit, offset int) ([]EntryResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	indexID, err := s.LatestIndexID(ctx)
 	if err != nil {
-		return []EntryResult{}, nil
+		if errors.Is(err, sql.ErrNoRows) {
+			return []EntryResult{}, nil
+		}
+		return nil, fmt.Errorf("failed to get latest index: %w", err)
 	}
 
 	var query string
-	var args []interface{}
+	var args []any
 
 	if recursive {
 		query = `
-			SELECT relative_path, name, is_dir, size, mod_time, inode
-			FROM entries
-			WHERE index_id = ? AND (relative_path = ? OR relative_path LIKE ?)
-			ORDER BY relative_path
-		`
-		args = []interface{}{indexID, path, path + "%"}
+            SELECT relative_path, name, is_dir, size, mod_time, inode
+            FROM entries
+            WHERE index_id = ? AND (relative_path = ? OR relative_path LIKE ?)
+            ORDER BY relative_path
+        `
+		args = []any{indexID, path, path + "%"}
 	} else {
 		query = `
-			SELECT relative_path, name, is_dir, size, mod_time, inode
-			FROM entries
-			WHERE index_id = ? AND relative_path = ?
-		`
-		args = []interface{}{indexID, path}
+            SELECT relative_path, name, is_dir, size, mod_time, inode
+            FROM entries
+            WHERE index_id = ? AND relative_path = ?
+        `
+		args = []any{indexID, path}
 	}
 
 	if limit > 0 {
@@ -224,8 +256,11 @@ type Stats struct {
 }
 
 // GetStats returns database statistics
-func (s *Store) GetStats() (*Stats, error) {
-	ctx := context.Background()
+func (s *Store) GetStats(ctx context.Context) (*Stats, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	var stats Stats
 
 	// Get total indexes
@@ -234,15 +269,15 @@ func (s *Store) GetStats() (*Stats, error) {
 		return nil, err
 	}
 
-	// Get total entries and size from latest index
+	// Get total entries and size and last_indexed
 	var lastIndexed sql.NullInt64
 	err = s.db.QueryRowContext(ctx, `
-		SELECT
-			COALESCE(SUM(num_files + num_dirs), 0),
-			COALESCE(SUM(total_size), 0),
-			MAX(last_indexed)
-		FROM indexes
-	`).Scan(&stats.TotalEntries, &stats.TotalSize, &lastIndexed)
+        SELECT
+            COALESCE(SUM(num_files + num_dirs), 0),
+            COALESCE(SUM(total_size), 0),
+            MAX(last_indexed)
+        FROM indexes
+    `).Scan(&stats.TotalEntries, &stats.TotalSize, &lastIndexed)
 	if err != nil {
 		return nil, err
 	}
@@ -251,9 +286,11 @@ func (s *Store) GetStats() (*Stats, error) {
 		stats.LastScanTime = time.Unix(lastIndexed.Int64, 0)
 	}
 
-	// Get database file size
-	if fi, err := os.Stat(defaultDBPath); err == nil {
-		stats.DatabaseSize = fi.Size()
+	// Get database file size using the actual dbPath
+	if s.dbPath != "" {
+		if fi, err := os.Stat(s.dbPath); err == nil {
+			stats.DatabaseSize = fi.Size()
+		}
 	}
 
 	return &stats, nil

@@ -27,9 +27,10 @@ func TestHandleAddAndDelete(t *testing.T) {
 		cfg: DaemonConfig{
 			IndexName: "test",
 			IndexPath: "/",
+			DBPath:    dbPath,
 		},
 		db:    db,
-		store: storage.NewStoreWithDB(db),
+		store: storage.NewStoreWithDB(db, dbPath),
 	}
 
 	// Seed an index row so latestIndexID works.
@@ -43,7 +44,7 @@ func TestHandleAddAndDelete(t *testing.T) {
 	`, d.cfg.IndexName, d.cfg.IndexPath, d.cfg.IndexPath); err != nil {
 		t.Fatalf("insert index: %v", err)
 	}
-	store := storage.NewStoreWithDB(db)
+	store := storage.NewStoreWithDB(db, dbPath)
 	indexID, err := store.LatestIndexID(context.Background())
 	if err != nil {
 		t.Fatalf("latest index id: %v", err)

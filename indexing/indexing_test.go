@@ -30,6 +30,18 @@ func (w *memoryWriter) entriesByPath() map[string]IndexEntry {
 	return result
 }
 
+func (w *memoryWriter) totalFileSize() int64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var total int64
+	for _, e := range w.entries {
+		if !e.IsDir {
+			total += e.Size
+		}
+	}
+	return total
+}
+
 func newStreamingIndex(t *testing.T, name, root string, includeHidden bool) (*Index, *memoryWriter) {
 	t.Helper()
 	idx := Initialize(name, root, root, includeHidden)
@@ -69,6 +81,29 @@ func TestStartIndexingStreamsEntries(t *testing.T) {
 	assertHasEntry(t, entries, "/documents/readme.txt", false)
 	assertHasEntry(t, entries, "/photos", true)
 	assertHasEntry(t, entries, "/photos/image1.jpg", false)
+}
+
+func TestDirMetadataKeyConsistency(t *testing.T) {
+	mock := testhelpers.NewMockFileSystem(t)
+	defer mock.Cleanup()
+
+	mock.CreateDir("parent/child")
+	mock.CreateFile("parent/child/file1.txt", "abc")
+	mock.CreateFile("parent/file2.txt", "abcd")
+
+	idx, writer := newStreamingIndex(t, "test", mock.Root, false)
+	if err := idx.StartIndexing(); err != nil {
+		t.Fatalf("StartIndexing failed: %v", err)
+	}
+
+	expectedDiskUsed := uint64(writer.totalFileSize())
+	if expectedDiskUsed == 0 {
+		t.Fatalf("expected non-zero file sizes from writer")
+	}
+
+	if idx.DiskUsed != expectedDiskUsed {
+		t.Fatalf("expected DiskUsed=%d, got %d", expectedDiskUsed, idx.DiskUsed)
+	}
 }
 
 func TestHiddenFilesControlledByFlag(t *testing.T) {

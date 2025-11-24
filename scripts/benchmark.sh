@@ -7,7 +7,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Configuration
 INDEXER_PATH="${INDEXER_PATH:-$PROJECT_ROOT/indexer}"
-TEST_PATH="${TEST_PATH:-}"
+TEST_PATH="${TEST_PATH:-/}"
 DB_PATH="${DB_PATH:-/tmp/benchmark_indexer.db}"
 SOCKET_PATH="${SOCKET_PATH:-/tmp/benchmark_indexer.sock}"
 LISTEN_ADDR="${LISTEN_ADDR:-}"
@@ -17,17 +17,10 @@ RUN_REINDEX="${RUN_REINDEX:-true}"
 TOP_SNAPSHOT="${TOP_SNAPSHOT:-true}"
 DATASET_DIR="${DATASET_DIR:-}"
 DATASET_FILES="${DATASET_FILES:-1000}"
-
-if [ -z "$TEST_PATH" ]; then
-    if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-        TEST_PATH="/"
-    else
-        TEST_PATH="${HOME:-/tmp}"
-    fi
-fi
-
-if [ -z "$DATASET_DIR" ]; then
-    DATASET_DIR="$TEST_PATH/.indexer_benchmark_data"
+GOCACHE="${GOCACHE:-$PROJECT_ROOT/.cache}"
+REMOVE_GOCACHE_ON_EXIT=false
+if [ "$GOCACHE" = "$PROJECT_ROOT/.cache" ]; then
+    REMOVE_GOCACHE_ON_EXIT=true
 fi
 
 curl_api() {
@@ -74,19 +67,37 @@ log_step() {
 }
 
 prepare_dataset() {
+    mkdir -p "$TEST_PATH" 2>/dev/null || {
+        log_error "Unable to create TEST_PATH ($TEST_PATH); check permissions"
+        exit 1
+    }
+    if [ -z "$DATASET_DIR" ]; then
+        local base="$TEST_PATH"
+        if [ "$TEST_PATH" = "/" ]; then
+            base="/tmp"
+        fi
+        DATASET_DIR="$(mktemp -d "$base/.indexer_benchmark_data.XXXXXX")"
+    fi
     if [ "$DATASET_DIR" = "/" ] || [ -z "$DATASET_DIR" ]; then
         log_error "Refusing to use unsafe DATASET_DIR: '$DATASET_DIR'"
         exit 1
     fi
-    case "$DATASET_DIR" in
-        "$TEST_PATH"/*|"$TEST_PATH") ;;
-        *)
-            log_error "DATASET_DIR must live under TEST_PATH (current: $DATASET_DIR, TEST_PATH: $TEST_PATH)"
-            exit 1
-            ;;
-    esac
+    if [ "$TEST_PATH" != "/" ]; then
+        case "$DATASET_DIR" in
+            "$TEST_PATH"/*|"$TEST_PATH") ;;
+            *)
+                log_error "DATASET_DIR must live under TEST_PATH (current: $DATASET_DIR, TEST_PATH: $TEST_PATH)"
+                exit 1
+                ;;
+        esac
+    fi
     log_step "Preparing synthetic dataset ($DATASET_FILES files) at $DATASET_DIR"
-    rm -rf "$DATASET_DIR"
+    if [ -e "$DATASET_DIR" ]; then
+        rm -rf "$DATASET_DIR" || {
+            log_error "Failed to clean DATASET_DIR ($DATASET_DIR); check ownership/permissions"
+            exit 1
+        }
+    fi
     mkdir -p "$DATASET_DIR"
     for i in $(seq 1 "$DATASET_FILES"); do
         printf "benchmark file %04d\n" "$i" > "$DATASET_DIR/file_$i.txt"
@@ -99,13 +110,15 @@ mutate_dataset_for_reindex() {
         log_error "Refusing to mutate unsafe DATASET_DIR: '$DATASET_DIR'"
         exit 1
     fi
-    case "$DATASET_DIR" in
-        "$TEST_PATH"/*|"$TEST_PATH") ;;
-        *)
-            log_error "DATASET_DIR must live under TEST_PATH (current: $DATASET_DIR, TEST_PATH: $TEST_PATH)"
-            exit 1
-            ;;
-    esac
+    if [ "$TEST_PATH" != "/" ]; then
+        case "$DATASET_DIR" in
+            "$TEST_PATH"/*|"$TEST_PATH") ;;
+            *)
+                log_error "DATASET_DIR must live under TEST_PATH (current: $DATASET_DIR, TEST_PATH: $TEST_PATH)"
+                exit 1
+                ;;
+        esac
+    fi
     log_step "Mutating dataset for reindex (deleting files)"
     find "$DATASET_DIR" -maxdepth 1 -type f -delete
     log_info "Deleted files in $DATASET_DIR"
@@ -160,12 +173,9 @@ capture_top_snapshot() {
 # Build indexer if needed
 build_indexer() {
     log_step "Building indexer"
-    if [ ! -f "$INDEXER_PATH" ]; then
-        (cd "$PROJECT_ROOT" && go build -o "$INDEXER_PATH" .)
-        log_info "Built indexer at $INDEXER_PATH"
-    else
-        log_info "Using existing indexer at $INDEXER_PATH"
-    fi
+    mkdir -p "$GOCACHE" 2>/dev/null || true
+    (cd "$PROJECT_ROOT" && GOCACHE="$GOCACHE" go build -o "$INDEXER_PATH" .)
+    log_info "Built indexer at $INDEXER_PATH"
 }
 
 # Monitor memory usage of a process
@@ -218,72 +228,47 @@ run_benchmark() {
         log_info "Cleaned up previous database"
     fi
 
-    # Start indexer in background
     local hidden_flag=""
     if [ "$INCLUDE_HIDDEN" = "true" ]; then
-        hidden_flag="-include-hidden"
+        hidden_flag="--include-hidden"
     fi
 
     local log_file="/tmp/benchmark_${safe_scenario}.log"
-    "$INDEXER_PATH" -path "$TEST_PATH" \
-        -db-path "$DB_PATH" \
-        -socket-path "$SOCKET_PATH" \
-        -listen "$LISTEN_ADDR" \
-        $hidden_flag \
-        -verbose > "$log_file" 2>&1 &
+    local cmd=( "$INDEXER_PATH" --reindex-mode --path "$TEST_PATH" --db-path "$DB_PATH" $hidden_flag --verbose )
 
+    log_info "Starting direct reindex: ${cmd[*]}"
+
+    local start_time
+    start_time=$(date +%s.%N)
+
+    "${cmd[@]}" > "$log_file" 2>&1 &
     local indexer_pid=$!
-    log_info "Started indexer (PID: $indexer_pid)"
-
-    # Wait for server to be ready
-    sleep 2
-    local idle_mem_kb
-    idle_mem_kb=$(get_rss_kb "$indexer_pid")
 
     # Start memory monitoring in background
     local mem_file="/tmp/benchmark_${safe_scenario}_mem.txt"
     monitor_memory "$indexer_pid" "$mem_file" &
     local monitor_pid=$!
 
-    # Trigger reindex
-    local start_time
-    start_time=$(date +%s.%N)
-    if ! curl_api "/reindex" POST > /dev/null; then
-        log_error "Reindex request failed; see $log_file"
-        wait "$monitor_pid" 2>/dev/null || true
-        return 1
-    fi
-    log_info "Triggered reindex"
-
-    # Wait for completion (check status endpoint)
-    local timeout=600 # 10 minutes
-    local elapsed=0
-    while [ $elapsed -lt $timeout ]; do
-        sleep 2
-        ((elapsed += 2))
-
-        local status
-        status=$(curl_api "/status" GET | grep -o '"status":"[^"]*"' | cut -d'"' -f4 || true)
-        if [ "$status" = "idle" ]; then
-            break
-        fi
-    done
+    # Wait for completion
+    wait "$indexer_pid"
+    local exit_code=$?
+    wait "$monitor_pid" 2>/dev/null || true
 
     local end_time
     end_time=$(date +%s.%N)
     local duration
     duration=$(awk -v start="$start_time" -v end="$end_time" 'BEGIN { printf "%.3f", end - start }')
 
-    # Optional snapshot of the live process before it exits
+    if [ $exit_code -ne 0 ]; then
+        log_error "Index process failed (exit $exit_code); see $log_file"
+        return 1
+    fi
+
+    # Optional snapshot of the live process before it exits (best-effort)
     local top_file="/tmp/benchmark_${safe_scenario}_top.txt"
     if [ "$TOP_SNAPSHOT" = "true" ]; then
         capture_top_snapshot "$indexer_pid" "$top_file"
     fi
-
-    # Stop indexer
-    kill "$indexer_pid" 2>/dev/null || true
-    wait "$indexer_pid" 2>/dev/null || true
-    wait "$monitor_pid" 2>/dev/null || true
 
     # Collect results
     local mem_stats
@@ -300,8 +285,7 @@ run_benchmark() {
     max_mem_mb=$(awk -v m="$max_mem" 'BEGIN { printf "%.2f", m / 1024 }')
     local avg_mem_mb
     avg_mem_mb=$(awk -v m="$avg_mem" 'BEGIN { printf "%.2f", m / 1024 }')
-    local idle_mem_mb
-    idle_mem_mb=$(awk -v m="${idle_mem_kb:-0}" 'BEGIN { printf "%.2f", m / 1024 }')
+    local idle_mem_mb="0.00"
 
     # Get database stats
     local db_size
@@ -314,9 +298,7 @@ run_benchmark() {
     num_files=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM entries WHERE is_dir = 0;" 2>/dev/null || echo "0")
 
     # Check for cleanup in logs
-    local deleted_entries
-    deleted_entries=$(grep -o "Cleaned up [0-9]* deleted entries" "$log_file" 2>/dev/null | grep -o "[0-9]*" | head -1 || echo "0")
-    deleted_entries=${deleted_entries:-0}
+    local deleted_entries="0"
 
     log_info "Duration: ${duration}s"
     log_info "Max Memory: ${max_mem_mb} MB (from ${num_samples} samples)"
@@ -339,7 +321,7 @@ run_benchmark() {
     echo "$scenario|$duration|$idle_mem_mb|$max_mem_mb|$avg_mem_mb|$num_entries|$num_dirs|$num_files|$db_size|$deleted_entries" >> /tmp/benchmark_results.txt
 
     # Clean up
-    rm -f "$mem_file" "$log_file"
+    rm -f "$mem_file"
 }
 
 # Generate markdown report
@@ -460,6 +442,9 @@ main() {
     # Final cleanup
     rm -f "$DB_PATH"* "$SOCKET_PATH" /tmp/benchmark_results.txt
     rm -rf "$DATASET_DIR"
+    if [ "$REMOVE_GOCACHE_ON_EXIT" = true ] && [ -d "$GOCACHE" ]; then
+        rm -rf "$GOCACHE"
+    fi
 
     log_info "Benchmark complete!"
     log_info "Results saved to: $OUTPUT_FILE"

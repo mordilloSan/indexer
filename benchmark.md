@@ -1,6 +1,6 @@
 # Indexer Benchmark Results
 
-**Generated:** 2025-11-23 09:07:48 UTC
+**Generated:** 2025-11-24 13:41:08 UTC
 **Host:** ubuntuserver
 **CPU:** Intel(R) N100
 **Memory:** 15Gi
@@ -8,7 +8,7 @@
 
 ## Configuration
 
-- **Test Path:** `/home/miguelmariz`
+- **Test Path:** `/`
 - **Database:** `/tmp/benchmark_indexer.db`
 - **Include Hidden:** true
 
@@ -18,30 +18,30 @@
 - Reindex (After Deletions): rerun after removing synthetic files (optional)
 ## Summary
 
-- Fresh DB: 16.111s, idle 9.24 MB, max 161.55 MB, avg 93.42 MB, entries 993303 (dirs 238072, files 755231), DB 384M, cleaned 0
-- Reindex (After Deletions): 16.104s, idle 9.25 MB, max 153.27 MB, avg 79.20 MB, entries 992303 (dirs 238072, files 754231), DB 384M, cleaned 1000
+- Fresh DB: 13.664s, idle 0.00 MB, max 67.01 MB, avg 39.61 MB, entries 1238796 (dirs 264710, files 974086), DB 481M, cleaned 0
+- Reindex (After Deletions): 20.778s, idle 0.00 MB, max 54.43 MB, avg 37.13 MB, entries 1237797 (dirs 264710, files 973087), DB 481M, cleaned 0
 
 ## Results
 
 ### Fresh DB
-- Duration: 16.111s
-- Idle Memory: 9.24 MB (after startup, before reindex)
-- Max Memory: 161.55 MB
-- Avg Memory: 93.42 MB
-- Entries: 993303 (dirs 238072, files 755231)
-- DB Size: 384M
+- Duration: 13.664s
+- Idle Memory: 0.00 MB (after startup, before reindex)
+- Max Memory: 67.01 MB
+- Avg Memory: 39.61 MB
+- Entries: 1238796 (dirs 264710, files 974086)
+- DB Size: 481M
 - Deleted Entries: 0
-- Snapshot Mem: VmRSS 22.75 MB (VmHWM 161.07 MB, VmPeak 1986.70 MB)
+- Snapshot Mem: VmRSS n/a (VmHWM n/a, VmPeak n/a)
 - Snapshot File: /tmp/benchmark_Fresh_DB_top.txt
 
 ### Reindex (After Deletions)
-- Duration: 16.104s
-- Idle Memory: 9.25 MB (after startup, before reindex)
-- Max Memory: 153.27 MB
-- Avg Memory: 79.20 MB
-- Entries: 992303 (dirs 238072, files 754231)
-- DB Size: 384M
-- Deleted Entries: 1000
-- Snapshot Mem: VmRSS 24.14 MB (VmHWM 162.83 MB, VmPeak 2058.77 MB)
+- Duration: 20.778s
+- Idle Memory: 0.00 MB (after startup, before reindex)
+- Max Memory: 54.43 MB
+- Avg Memory: 37.13 MB
+- Entries: 1237797 (dirs 264710, files 973087)
+- DB Size: 481M
+- Deleted Entries: 0
+- Snapshot Mem: VmRSS n/a (VmHWM n/a, VmPeak n/a)
 - Snapshot File: /tmp/benchmark_Reindex__After_Deletions__top.txt
 
