@@ -127,7 +127,8 @@ func (s *Store) SearchEntries(ctx context.Context, pattern string, limit int) ([
 	return results, rows.Err()
 }
 
-// DirSize aggregates total size under the given path (inclusive).
+// DirSize returns the pre-calculated size for a directory.
+// The size is calculated during indexing and stored in the directory entry.
 func (s *Store) DirSize(ctx context.Context, path string) (int64, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -141,16 +142,19 @@ func (s *Store) DirSize(ctx context.Context, path string) (int64, error) {
 		return 0, fmt.Errorf("failed to get latest index: %w", err)
 	}
 
-	var total sql.NullInt64
+	var size sql.NullInt64
 	if err := s.db.QueryRowContext(ctx, `
-        SELECT SUM(size)
+        SELECT size
         FROM entries
-        WHERE index_id = ? AND (relative_path = ? OR relative_path LIKE ?)
-    `, indexID, path, path+"%").Scan(&total); err != nil {
+        WHERE index_id = ? AND relative_path = ? AND is_dir = 1
+    `, indexID, path).Scan(&size); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, fmt.Errorf("directory not found: %s", path)
+		}
 		return 0, fmt.Errorf("dir size query failed: %w", err)
 	}
-	if total.Valid {
-		return total.Int64, nil
+	if size.Valid {
+		return size.Int64, nil
 	}
 	return 0, nil
 }
