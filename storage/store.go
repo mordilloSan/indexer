@@ -41,8 +41,8 @@ func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
-// latestIndexID returns the ID of the most recently indexed index
-func (s *Store) latestIndexID(ctx context.Context) (int64, error) {
+// LatestIndexID returns the ID of the most recently indexed index
+func (s *Store) LatestIndexID(ctx context.Context) (int64, error) {
 	var id int64
 	err := s.db.QueryRowContext(ctx, `SELECT id FROM indexes ORDER BY last_indexed DESC LIMIT 1`).Scan(&id)
 	if err == sql.ErrNoRows {
@@ -71,7 +71,7 @@ func (s *Store) SearchEntries(pattern string, limit int) ([]EntryResult, error) 
 		limit = 100
 	}
 
-	indexID, err := s.latestIndexID(ctx)
+	indexID, err := s.LatestIndexID(ctx)
 	if err != nil {
 		return []EntryResult{}, nil
 	}
@@ -110,7 +110,7 @@ func (s *Store) SearchEntries(pattern string, limit int) ([]EntryResult, error) 
 // DirSize aggregates total size under the given path (inclusive).
 func (s *Store) DirSize(path string) (int64, error) {
 	ctx := context.Background()
-	indexID, err := s.latestIndexID(ctx)
+	indexID, err := s.LatestIndexID(ctx)
 	if err != nil {
 		return 0, nil
 	}
@@ -153,7 +153,7 @@ func (s *Store) UpsertEntry(indexID int64, entry EntryResult, absPath, typ strin
 // QueryPath queries entries at or under a given path
 func (s *Store) QueryPath(path string, recursive bool, limit, offset int) ([]EntryResult, error) {
 	ctx := context.Background()
-	indexID, err := s.latestIndexID(ctx)
+	indexID, err := s.LatestIndexID(ctx)
 	if err != nil {
 		return []EntryResult{}, nil
 	}

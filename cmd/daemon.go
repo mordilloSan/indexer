@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
@@ -59,16 +60,23 @@ func NewDaemon(cfg DaemonConfig) (*daemon, error) {
 		cfg.DBPath = "/var/run/indexer.db"
 	}
 
-	dbExisted := fileExists(cfg.DBPath)
-	db, err := storage.Open(cfg.DBPath)
+	db, dbExisted, err := openDatabaseWithIntegrityCheck(cfg.DBPath)
 	if err != nil {
 		return nil, err
 	}
-	if dbExisted {
-		logger.Infof("Database exists at %s; reusing existing indexes", cfg.DBPath)
-		logLatestIndexStatus(db)
+
+	logger.Infof("DB connection pool opened: %s", cfg.DBPath)
+	journalCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	journalMode, err := storage.GetJournalMode(journalCtx, db)
+	if err != nil {
+		logger.Warnf("Failed to determine database journal_mode: %v", err)
 	} else {
-		logger.Infof("Database not found; creating new at %s", cfg.DBPath)
+		logger.Infof("Database journal_mode: %s", strings.ToUpper(journalMode))
+	}
+
+	if dbExisted {
+		logLatestIndexStatus(db)
 	}
 
 	return &daemon{
@@ -127,7 +135,9 @@ func (d *daemon) getUnixListener() (net.Listener, bool, error) {
 		return nil, false, fmt.Errorf("listen on unix socket: %w", err)
 	}
 	if err := os.Chmod(d.cfg.SocketPath, 0o666); err != nil {
-		l.Close()
+		if closeErr := l.Close(); closeErr != nil {
+			logger.Warnf("Failed to close listener after chmod error: %v", closeErr)
+		}
 		return nil, false, fmt.Errorf("chmod socket: %w", err)
 	}
 
@@ -166,13 +176,19 @@ func systemdUnixListener() net.Listener {
 	// Convert file to listener
 	l, err := net.FileListener(file)
 	if err != nil {
-		file.Close()
+		if closeErr := file.Close(); closeErr != nil {
+			logger.Warnf("Failed to close file after FileListener error: %v", closeErr)
+		}
 		return nil
 	}
 
 	// Clear environment to prevent child processes from inheriting
-	os.Unsetenv("LISTEN_PID")
-	os.Unsetenv("LISTEN_FDS")
+	if err := os.Unsetenv("LISTEN_PID"); err != nil {
+		logger.Warnf("Failed to unset LISTEN_PID: %v", err)
+	}
+	if err := os.Unsetenv("LISTEN_FDS"); err != nil {
+		logger.Warnf("Failed to unset LISTEN_FDS: %v", err)
+	}
 
 	return l
 }
@@ -184,12 +200,60 @@ func isSystemdSocket() bool {
 	return pid != "" && fds != ""
 }
 
-// run starts the scheduler (if any) and blocks serving HTTP over a Unix socket.
+// Run starts the scheduler (if any) and HTTP server, blocks until context is cancelled
 func (d *daemon) Run(ctx context.Context) error {
+	// Trigger initial index if database is empty
 	if d.cfg.Interval > 0 {
 		go d.startScheduler(ctx)
 	}
 	return d.startHTTP(ctx)
+}
+
+// SpawnInitialIndex checks if database needs initial indexing and triggers it if needed
+func (d *daemon) SpawnInitialIndex(ctx context.Context) {
+	needsIndex, err := d.needsInitialIndex()
+	if err != nil {
+		logger.Errorf("Failed to check if database needs indexing: %v", err)
+		return
+	}
+
+	if needsIndex {
+		logger.Infof("Database needs initial indexing; spawning in background")
+		go func() {
+			if err := d.runIndexOnce(ctx); err != nil {
+				logger.Errorf("Initial index failed: %v", err)
+			}
+		}()
+	}
+}
+
+// needsInitialIndex checks if database is empty OR index has never been indexed
+func (d *daemon) needsInitialIndex() (bool, error) {
+	// Check if there are any indexes
+	var count int
+	err := d.db.QueryRow(`SELECT COUNT(*) FROM indexes`).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+
+	// No indexes at all - needs indexing
+	if count == 0 {
+		return true, nil
+	}
+
+	// Check if the index has ever been indexed (last_indexed is NULL or 0)
+	var lastIndexed sql.NullInt64
+	err = d.db.QueryRow(`SELECT last_indexed FROM indexes WHERE name = ? LIMIT 1`, d.cfg.IndexName).Scan(&lastIndexed)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			// Index with this name doesn't exist - needs indexing
+			return true, nil
+		}
+		return false, err
+	}
+
+	// If last_indexed is NULL or 0, needs indexing
+	return !lastIndexed.Valid || lastIndexed.Int64 == 0, nil
 }
 
 func (d *daemon) startScheduler(ctx context.Context) {
@@ -199,7 +263,7 @@ func (d *daemon) startScheduler(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			if err := d.runIndexOnce(ctx); err != nil {
-				logger.Errorf("scheduled reindex failed: %v", err)
+				logger.Errorf("scheduled index failed: %v", err)
 			}
 		case <-ctx.Done():
 			return
@@ -256,6 +320,9 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 		return fmt.Errorf("no listeners configured")
 	}
 
+	// Spawn initial index if database is empty (after API is ready)
+	d.SpawnInitialIndex(ctx)
+
 	select {
 	case <-ctx.Done():
 		for _, srv := range d.servers {
@@ -281,40 +348,127 @@ func (d *daemon) unlockIndex() {
 	d.running.Store(false)
 }
 
-// runIndexOnce performs a full streaming reindex using the shared DB connection.
+// runIndexOnce performs an index by spawning the binary in index mode
 func (d *daemon) runIndexOnce(ctx context.Context) error {
 	if !d.tryLockIndex() {
 		return fmt.Errorf("indexer already running")
 	}
 	defer d.unlockIndex()
-	return d.runIndex(ctx)
+	return d.runIndexSubprocess(ctx)
 }
 
-// runIndex contains the indexing workflow and assumes the caller holds the lock.
-func (d *daemon) runIndex(ctx context.Context) error {
-	index := indexing.Initialize(d.cfg.IndexName, d.cfg.IndexPath, d.cfg.IndexPath, d.cfg.IncludeHidden)
+// runIndexSubprocess spawns the current binary with --reindex-mode flag
+// Uses systemd-run --scope to isolate memory accounting from the daemon's cgroup
+func (d *daemon) runIndexSubprocess(ctx context.Context) error {
+	// Build args for the index binary
+	args := []string{
+		"--reindex-mode",
+		"--path", d.cfg.IndexPath,
+		"--name", d.cfg.IndexName,
+		"--db-path", d.cfg.DBPath,
+	}
+	if d.cfg.IncludeHidden {
+		args = append(args, "--include-hidden")
+	}
+
+	// Use systemd-run to spawn in a separate cgroup/scope
+	// This ensures proper memory accounting - the daemon's cgroup won't include subprocess memory
+	unitName := fmt.Sprintf("indexer-index-%d", time.Now().Unix())
+	systemdArgs := []string{
+		"--scope",            // Run as a transient scope (not a full service)
+		"--unit=" + unitName, // Give it a unique name
+		os.Args[0],           // The binary to run (still secure - uses os.Args[0])
+	}
+	systemdArgs = append(systemdArgs, args...) // Add index-mode args
+
+	cmd := exec.CommandContext(ctx, "systemd-run", systemdArgs...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	logger.Infof("Starting index process")
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("index subprocess failed: %w", err)
+	}
+
+	logger.Infof("Index process completed successfully")
+	return nil
+}
+
+func (d *daemon) handleReindex(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "use POST", http.StatusMethodNotAllowed)
+		return
+	}
+	if !d.tryLockIndex() {
+		http.Error(w, "indexer already running", http.StatusConflict)
+		return
+	}
+	go func() {
+		defer d.unlockIndex()
+		if err := d.runIndexSubprocess(context.Background()); err != nil {
+			logger.Errorf("manual index failed: %v", err)
+		}
+	}()
+	w.WriteHeader(http.StatusAccepted)
+	_, _ = w.Write([]byte(`{"status":"running"}`))
+}
+
+// RunIndexMode is called from main when --reindex-mode flag is set
+// It performs the index and exits (releasing all memory including leaks)
+func RunIndexMode(indexName, indexPath string, includeHidden bool, dbPath string, verbose bool) {
+	logger.Infof("Running in index mode: path=%s name=%s db=%s", indexPath, indexName, dbPath)
+
+	db, _, err := openDatabaseWithIntegrityCheck(dbPath)
+	if err != nil {
+		logger.Fatalf("Failed to open database: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			logger.Warnf("Failed to close database: %v", err)
+		}
+	}()
+
+	// Run index
+	ctx := context.Background()
+	if err := runIndex(ctx, db, indexName, indexPath, includeHidden); err != nil {
+		logger.Fatalf("Index failed: %v", err)
+	}
+
+	logger.Infof("Index complete, subprocess exiting")
+}
+
+// runIndex performs the actual indexing work
+func runIndex(ctx context.Context, db *sql.DB, indexName, indexPath string, includeHidden bool) error {
+	index := indexing.Initialize(indexName, indexPath, indexPath, includeHidden)
 
 	start := time.Now()
 
-	indexID, err := d.prepareIndexRecord(ctx)
+	// Prepare index record in database
+	indexID, err := prepareIndexRecord(ctx, db, indexName, indexPath, includeHidden)
 	if err != nil {
-		return err
+		return fmt.Errorf("prepare index record: %w", err)
 	}
 
-	writer := storage.NewStreamingWriter(ctx, d.db, indexID, 1000)
+	// Create streaming writer with batch size of 1000
+	writer := storage.NewStreamingWriter(ctx, db, indexID, 1000)
 	index.EnableStreaming(writer)
 
+	// Start filesystem traversal
+	logger.Infof("Starting filesystem traversal...")
 	if err := index.StartIndexing(); err != nil {
 		_ = writer.Close()
-		return err
+		return fmt.Errorf("indexing failed: %w", err)
 	}
+
+	// Flush remaining batches
 	if err := writer.Close(); err != nil {
-		return fmt.Errorf("streaming writer: %w", err)
+		return fmt.Errorf("streaming writer close: %w", err)
 	}
 
 	// Cleanup deleted entries (files that were not seen during this scan)
 	scanTime := writer.ScanTime()
-	deleted, err := storage.CleanupDeletedEntries(ctx, d.db, indexID, scanTime)
+	deleted, err := storage.CleanupDeletedEntries(ctx, db, indexID, scanTime)
 	if err != nil {
 		return fmt.Errorf("cleanup deleted entries: %w", err)
 	}
@@ -322,7 +476,8 @@ func (d *daemon) runIndex(ctx context.Context) error {
 		logger.Infof("Cleaned up %d deleted entries", deleted)
 	}
 
-	if _, err := d.db.ExecContext(ctx, `
+	// Update index metadata
+	if _, err := db.ExecContext(ctx, `
 		UPDATE indexes SET
 			num_dirs = ?,
 			num_files = ?,
@@ -340,34 +495,37 @@ func (d *daemon) runIndex(ctx context.Context) error {
 		time.Now().UTC().Unix(),
 		indexID,
 	); err != nil {
-		index.Cleanup()
-		runtime.GC()
-		debug.FreeOSMemory()
-		runtime.GC()
 		return fmt.Errorf("update index metadata: %w", err)
 	}
-	logger.Infof("Index run complete in %v (dirs=%d files=%d)", time.Since(start).Truncate(time.Millisecond), index.NumDirs, index.NumFiles)
 
-	// Free memory from Index's internal maps before GC
+	logger.Infof("Index complete in %v (dirs=%d files=%d size=%d)",
+		time.Since(start).Truncate(time.Millisecond),
+		index.NumDirs,
+		index.NumFiles,
+		index.GetTotalSize(),
+	)
+
+	// Free memory from Index's internal maps
 	index.Cleanup()
 
 	// Release SQLite internal caches
-	if err := storage.ReleaseSQLiteMemory(ctx, d.db); err != nil {
+	if err := storage.ReleaseSQLiteMemory(ctx, db); err != nil {
 		logger.Warnf("Failed to release SQLite memory: %v", err)
 	}
 
-	// Aggressively reclaim memory from indexing
-	runtime.GC()         // Run garbage collection
-	debug.FreeOSMemory() // Force return memory to OS immediately
-	runtime.GC()         // Run GC again after freeing
+	// Aggressively reclaim memory
+	runtime.GC()
+	debug.FreeOSMemory()
+	runtime.GC()
 
 	return nil
 }
 
-func (d *daemon) prepareIndexRecord(ctx context.Context) (int64, error) {
-	tx, err := d.db.BeginTx(ctx, nil)
+// prepareIndexRecord creates or updates the index record in the database
+func prepareIndexRecord(ctx context.Context, db *sql.DB, indexName, indexPath string, includeHidden bool) (int64, error) {
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("begin transaction: %w", err)
 	}
 	defer func() {
 		if err != nil {
@@ -375,13 +533,15 @@ func (d *daemon) prepareIndexRecord(ctx context.Context) (int64, error) {
 		}
 	}()
 
+	// Get existing last_indexed timestamp if available
 	var existingLastIndexed sql.NullInt64
-	_ = tx.QueryRowContext(ctx, `SELECT last_indexed FROM indexes WHERE name = ?;`, d.cfg.IndexName).Scan(&existingLastIndexed)
+	_ = tx.QueryRowContext(ctx, `SELECT last_indexed FROM indexes WHERE name = ?;`, indexName).Scan(&existingLastIndexed)
 	lastIndexed := int64(0)
 	if existingLastIndexed.Valid {
 		lastIndexed = existingLastIndexed.Int64
 	}
 
+	// Insert or update index record
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO indexes (
 			name, root_path, source, include_hidden,
@@ -394,48 +554,27 @@ func (d *daemon) prepareIndexRecord(ctx context.Context) (int64, error) {
 			source=excluded.source,
 			include_hidden=excluded.include_hidden;
 	`,
-		d.cfg.IndexName,
-		d.cfg.IndexPath,
-		d.cfg.IndexPath,
-		indexing.BoolToInt(d.cfg.IncludeHidden),
+		indexName,
+		indexPath,
+		indexPath,
+		indexing.BoolToInt(includeHidden),
 		lastIndexed,
 	)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("insert/update index: %w", err)
 	}
 
+	// Get the index ID
 	var indexID int64
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM indexes WHERE name = ?;`, d.cfg.IndexName).Scan(&indexID); err != nil {
-		return 0, err
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM indexes WHERE name = ?;`, indexName).Scan(&indexID); err != nil {
+		return 0, fmt.Errorf("get index id: %w", err)
 	}
 
-	err = tx.Commit()
-	return indexID, err
-}
-
-func (d *daemon) latestIndexID(ctx context.Context) (int64, error) {
-	var id int64
-	err := d.db.QueryRowContext(ctx, `SELECT id FROM indexes ORDER BY last_indexed DESC LIMIT 1`).Scan(&id)
-	return id, err
-}
-
-func (d *daemon) handleReindex(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "use POST", http.StatusMethodNotAllowed)
-		return
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit transaction: %w", err)
 	}
-	if !d.tryLockIndex() {
-		http.Error(w, "indexer already running", http.StatusConflict)
-		return
-	}
-	go func() {
-		defer d.unlockIndex()
-		if err := d.runIndex(context.Background()); err != nil {
-			logger.Errorf("manual reindex failed: %v", err)
-		}
-	}()
-	w.WriteHeader(http.StatusAccepted)
-	_, _ = w.Write([]byte(`{"status":"running"}`))
+
+	return indexID, nil
 }
 
 func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -576,7 +715,8 @@ func (d *daemon) handleAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	indexID, err := d.latestIndexID(ctx)
+	store := storage.NewStoreWithDB(d.db)
+	indexID, err := store.LatestIndexID(ctx)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("no index present: %v", err), http.StatusBadRequest)
 		return
@@ -631,7 +771,8 @@ func (d *daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	indexID, err := d.latestIndexID(ctx)
+	store := storage.NewStoreWithDB(d.db)
+	indexID, err := store.LatestIndexID(ctx)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("no index present: %v", err), http.StatusBadRequest)
 		return
@@ -654,6 +795,64 @@ func writeJSON(w http.ResponseWriter, v any) {
 func serveOpenapi(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(openapiSpec))
+}
+
+// openDatabaseWithIntegrityCheck opens a database and checks for corruption.
+// If corrupted, it automatically removes and recreates the database.
+// Returns the opened database connection and whether it existed before.
+func openDatabaseWithIntegrityCheck(dbPath string) (*sql.DB, bool, error) {
+	dbExisted := fileExists(dbPath)
+	if dbExisted {
+		logger.Infof("Database exists at %s; checking integrity", dbPath)
+	} else {
+		logger.Infof("Database not found; creating new at %s", dbPath)
+	}
+
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		return nil, false, err
+	}
+
+	// Check for corruption if database existed
+	if dbExisted {
+		if err := checkDatabaseIntegrity(db); err != nil {
+			logger.Warnf("Database corruption detected: %v", err)
+			logger.Warnf("Closing corrupted database and recreating")
+			if closeErr := db.Close(); closeErr != nil {
+				logger.Warnf("Failed to close corrupted database: %v", closeErr)
+			}
+			// Remove database and associated WAL files
+			if err := os.Remove(dbPath); err != nil {
+				return nil, false, fmt.Errorf("failed to remove corrupted database: %w", err)
+			}
+			_ = os.Remove(dbPath + "-wal")
+			_ = os.Remove(dbPath + "-shm")
+			// Recreate fresh database
+			db, err = storage.Open(dbPath)
+			if err != nil {
+				return nil, false, err
+			}
+			logger.Infof("New database created at %s", dbPath)
+			dbExisted = false // Treat as new database
+		} else {
+			logger.Infof("Database integrity check passed")
+		}
+	}
+
+	return db, dbExisted, nil
+}
+
+// checkDatabaseIntegrity runs SQLite's integrity_check to detect corruption
+func checkDatabaseIntegrity(db *sql.DB) error {
+	var result string
+	err := db.QueryRow("PRAGMA integrity_check;").Scan(&result)
+	if err != nil {
+		return fmt.Errorf("integrity check query failed: %w", err)
+	}
+	if result != "ok" {
+		return fmt.Errorf("integrity check failed: %s", result)
+	}
+	return nil
 }
 
 func fileExists(path string) bool {

@@ -16,6 +16,7 @@ import (
 
 func main() {
 	var (
+		reindexMode     = flag.Bool("reindex-mode", false, "Internal: run reindex and exit (spawned by daemon)")
 		indexPath       = flag.String("path", "", "Path to index (required)")
 		indexName       = flag.String("name", "", "Name for this index (defaults to sanitized path)")
 		includeHidden   = flag.Bool("include-hidden", false, "Include hidden files and directories")
@@ -37,14 +38,21 @@ func main() {
 
 	nameVal := sanitizeName(*indexName, *indexPath)
 	dbVal := coalesce(*dbPath, os.Getenv("INDEXER_DB_PATH"), "/tmp/indexer.db")
+
+	// If running in reindex mode, do index and exit
+	if *reindexMode {
+		cmd.RunIndexMode(nameVal, *indexPath, *includeHidden, dbVal, *verbose)
+		return
+	}
+
+	// Otherwise, run daemon normally
 	socketVal := coalesce(*socketPath, "/var/run/indexer.sock")
 	listenVal := *listenAddr
 
-	interval := time.Duration(0)
-	if parsed, err := time.ParseDuration(*reindexInterval); err != nil {
+	interval, err := parseInterval(*reindexInterval)
+	if err != nil {
 		logger.Warnf("Invalid interval %q, defaulting to 0 (disabled): %v", *reindexInterval, err)
-	} else {
-		interval = parsed
+		interval = 0
 	}
 
 	cfg := cmd.DaemonConfig{
@@ -63,12 +71,12 @@ func main() {
 	}
 	defer d.Close()
 
-	// Log startup configuration
+	// Log daemon configuration
 	listenDisplay := cfg.ListenAddr
 	if listenDisplay == "" {
 		listenDisplay = "disabled"
 	}
-	logger.Infof("Starting indexer daemon path=%s name=%s db=%s socket=%s listen=%s includeHidden=%t interval=%v",
+	logger.Infof("Daemon initialized path=%s name=%s db=%s socket=%s listen=%s includeHidden=%t interval=%v",
 		cfg.IndexPath, cfg.IndexName, cfg.DBPath, cfg.SocketPath, listenDisplay, cfg.IncludeHidden, cfg.Interval)
 	if *dbPath == "" && os.Getenv("INDEXER_DB_PATH") == "" {
 		logger.Warnf("DB path not set; defaulting to %s", cfg.DBPath)
@@ -124,4 +132,11 @@ func coalesce(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func parseInterval(s string) (time.Duration, error) {
+	if s == "" || s == "0" {
+		return 0, nil
+	}
+	return time.ParseDuration(s)
 }

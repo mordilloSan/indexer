@@ -29,7 +29,7 @@ if [ -z "$GO_BIN" ]; then
     exit 1
 fi
 
-# Stop/disable any existing service and socket to avoid conflicts during install
+# Stop/disable any existing services and socket to avoid conflicts during install
 if systemctl list-unit-files | grep -q '^indexer.service'; then
     echo -e "${YELLOW}Stopping existing indexer.service (if running)...${NC}"
     systemctl stop indexer.service 2>/dev/null || true
@@ -46,7 +46,11 @@ fi
 
 # Step 1: Build the binary
 echo -e "${YELLOW}[1/5]${NC} Building indexer binary..."
-GO_BIN="$GO_BIN" make build || "$GO_BIN" build -o indexer
+if command -v make &>/dev/null; then
+    GO_BIN="$GO_BIN" make build
+else
+    "$GO_BIN" build -o indexer .
+fi
 
 # Step 2: Install binary
 echo -e "${YELLOW}[2/5]${NC} Installing binary to /usr/local/bin..."
@@ -74,9 +78,8 @@ INDEXER_NAME=root
 INDEXER_INCLUDE_HIDDEN=true
 INDEXER_SOCKET=/var/run/indexer.sock
 INDEXER_DB_PATH=/tmp/indexer.db
-INDEXER_LISTEN_FLAG=
-# Set to Go duration (e.g., 6h, 30m). Units are required; 0 disables.
 INDEXER_INTERVAL=1h
+INDEXER_LISTEN_FLAG=
 EOF
     echo -e "${GREEN}✓${NC} /etc/default/indexer created (edit to suit your system)"
 fi
@@ -113,9 +116,9 @@ echo -e "\n${GREEN}Installation completed successfully!${NC}\n"
 # Display usage instructions
 echo -e "${YELLOW}Usage:${NC}"
 echo "  Edit configuration:"
-echo "    sudo nano /etc/default/indexer   # set INDEXER_PATH, INDEXER_NAME, etc."
+echo "    sudo nano /etc/default/indexer   # set INDEXER_PATH, INDEXER_INTERVAL, etc."
 echo ""
-echo "  Restart with new settings:"
+echo "  Restart daemon with new settings:"
 echo "    sudo systemctl restart indexer.service"
 echo ""
 echo "  Check status:"
@@ -124,6 +127,13 @@ echo "    sudo systemctl status indexer.service"
 echo ""
 echo "  View logs:"
 echo "    sudo journalctl -u indexer.service -f"
+echo ""
+echo "  Manual reindex (via HTTP API):"
+echo "    curl -X POST --unix-socket /var/run/indexer.sock http://localhost/reindex"
+echo ""
+echo "  Auto-reindex interval:"
+echo "    Edit INDEXER_INTERVAL in /etc/default/indexer (e.g., 1h, 6h, 30m)"
+echo "    Set to 0 to disable automatic reindexing"
 echo ""
 echo "  Socket location: /var/run/indexer.sock (managed by systemd)"
 echo ""

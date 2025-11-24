@@ -211,10 +211,23 @@ func Open(path string) (*sql.DB, error) {
 		return nil, err
 	}
 
-	logger.Infof("Database connected: %s", path)
-	logger.Infof("Database journal_mode: %s", strings.ToUpper(journalMode))
-
 	return db, nil
+}
+
+// GetJournalMode returns the SQLite journal mode for the provided database.
+func GetJournalMode(ctx context.Context, db *sql.DB) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if db == nil {
+		return "", fmt.Errorf("db is nil")
+	}
+
+	var mode string
+	if err := db.QueryRowContext(ctx, `PRAGMA journal_mode;`).Scan(&mode); err != nil {
+		return "", err
+	}
+	return mode, nil
 }
 
 func initSchema(ctx context.Context, db *sql.DB) error {

@@ -42,7 +42,8 @@ func TestHandleAddAndDelete(t *testing.T) {
 	`, d.cfg.IndexName, d.cfg.IndexPath, d.cfg.IndexPath); err != nil {
 		t.Fatalf("insert index: %v", err)
 	}
-	indexID, err := d.latestIndexID(context.Background())
+	store := storage.NewStoreWithDB(db)
+	indexID, err := store.LatestIndexID(context.Background())
 	if err != nil {
 		t.Fatalf("latest index id: %v", err)
 	}
