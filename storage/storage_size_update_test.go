@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"indexer/indexing"
+	"github.com/mordilloSan/indexer/indexing"
 )
 
 // Integration-style test to ensure manual add/delete operations keep ancestor sizes in sync.

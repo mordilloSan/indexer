@@ -18,8 +18,8 @@ import (
 
 	"github.com/mordilloSan/go_logger/logger"
 
-	"indexer/indexing"
-	"indexer/storage"
+	"github.com/mordilloSan/indexer/indexing"
+	"github.com/mordilloSan/indexer/storage"
 )
 
 // DaemonConfig controls the long-running server.

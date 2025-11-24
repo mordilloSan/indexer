@@ -10,7 +10,7 @@ import (
 
 	"github.com/mordilloSan/go_logger/logger"
 
-	"indexer/indexing"
+	"github.com/mordilloSan/indexer/indexing"
 )
 
 // Store wraps the database connection

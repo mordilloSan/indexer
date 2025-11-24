@@ -1,4 +1,4 @@
-module indexer
+module github.com/mordilloSan/indexer
 
 go 1.25.4
 

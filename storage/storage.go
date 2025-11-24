@@ -12,7 +12,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mordilloSan/go_logger/logger"
 
-	"indexer/indexing"
+	"github.com/mordilloSan/indexer/indexing"
 )
 
 const (

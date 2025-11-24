@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"indexer/indexing/testhelpers"
+	"github.com/mordilloSan/indexer/indexing/testhelpers"
 )
 
 type memoryWriter struct {

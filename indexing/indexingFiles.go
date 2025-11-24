@@ -14,7 +14,7 @@ import (
 
 	"github.com/mordilloSan/go_logger/logger"
 
-	"indexer/indexing/iteminfo"
+	"github.com/mordilloSan/indexer/indexing/iteminfo"
 )
 
 var (

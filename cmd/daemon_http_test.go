@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"indexer/indexing"
-	"indexer/storage"
+	"github.com/mordilloSan/indexer/indexing"
+	"github.com/mordilloSan/indexer/storage"
 )
 
 // Exercise the manual add/delete handlers to ensure DB mutations and size propagation work.

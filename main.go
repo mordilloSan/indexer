@@ -11,7 +11,7 @@ import (
 
 	"github.com/mordilloSan/go_logger/logger"
 
-	"indexer/cmd"
+	"github.com/mordilloSan/indexer/cmd"
 )
 
 func main() {

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"indexer/indexing/iteminfo"
+	"github.com/mordilloSan/indexer/indexing/iteminfo"
 )
 
 // IndexEntry captures a flattened representation of either a directory or a file.
