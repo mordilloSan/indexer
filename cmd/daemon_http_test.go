@@ -117,3 +117,48 @@ func TestHandleAddAndDelete(t *testing.T) {
 		t.Fatalf("file row still present after delete")
 	}
 }
+
+// Ensure /status stays responsive while an index is running, even if DB reads fail.
+func TestHandleStatusWhileIndexingIgnoresDBErrors(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+
+	d := &daemon{
+		cfg: DaemonConfig{
+			IndexName: "test",
+			IndexPath: "/",
+			DBPath:    dbPath,
+		},
+		db:    db,
+		store: storage.NewStoreWithDB(db, dbPath),
+	}
+
+	// Simulate an in-progress index and a temporarily unavailable DB.
+	d.running.Store(true)
+	_ = db.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	rr := httptest.NewRecorder()
+	d.handleStatus(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status HTTP code = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Status  string `json:"status"`
+		Warning string `json:"warning"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "running" {
+		t.Fatalf("status = %q, want \"running\"", resp.Status)
+	}
+	if resp.Warning == "" {
+		t.Fatalf("expected warning when DB is unavailable; body=%s", rr.Body.String())
+	}
+}

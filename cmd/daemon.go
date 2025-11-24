@@ -575,6 +575,7 @@ func prepareIndexRecord(ctx context.Context, db *sql.DB, indexName, indexPath st
 
 func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	running := d.running.Load()
 
 	// Response shape (backwards-compatible + extra stats)
 	var resp struct {
@@ -586,12 +587,21 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		TotalIndexes int    `json:"total_indexes"`
 		TotalEntries int64  `json:"total_entries"`
 		DatabaseSize int64  `json:"database_size"`
+		Warning      string `json:"warning,omitempty"`
 	}
 
-	if d.running.Load() {
+	if running {
 		resp.Status = "running"
 	} else {
 		resp.Status = "idle"
+	}
+
+	addWarning := func(msg string) {
+		if resp.Warning == "" {
+			resp.Warning = msg
+		} else {
+			resp.Warning += "; " + msg
+		}
 	}
 
 	// 1) Per-latest-index stats (dirs/files/size/last_indexed)
@@ -600,8 +610,13 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, sql.ErrNoRows):
 		// No prior index: leave NumDirs/NumFiles/TotalSize/LastIndexed as zero values
 	case err != nil:
-		http.Error(w, fmt.Sprintf("error loading status: %v", err), http.StatusInternalServerError)
-		return
+		if running {
+			addWarning(fmt.Sprintf("latest index unavailable: %v", err))
+			logger.Warnf("Status: latest index unavailable while indexing: %v", err)
+		} else {
+			http.Error(w, fmt.Sprintf("error loading status: %v", err), http.StatusInternalServerError)
+			return
+		}
 	default:
 		resp.NumDirs = li.NumDirs
 		resp.NumFiles = li.NumFiles
@@ -614,13 +629,20 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// 2) Global stats (uses Store with correct dbPath for db size)
 	stats, err := d.store.GetStats(ctx)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("error loading stats: %v", err), http.StatusInternalServerError)
-		return
+		if running {
+			addWarning(fmt.Sprintf("stats unavailable: %v", err))
+			logger.Warnf("Status: global stats unavailable while indexing: %v", err)
+		} else {
+			http.Error(w, fmt.Sprintf("error loading stats: %v", err), http.StatusInternalServerError)
+			return
+		}
 	}
 
-	resp.TotalIndexes = stats.TotalIndexes
-	resp.TotalEntries = stats.TotalEntries
-	resp.DatabaseSize = stats.DatabaseSize
+	if stats != nil {
+		resp.TotalIndexes = stats.TotalIndexes
+		resp.TotalEntries = stats.TotalEntries
+		resp.DatabaseSize = stats.DatabaseSize
+	}
 
 	writeJSON(w, resp)
 }
