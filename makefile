@@ -11,7 +11,7 @@ GOLANGCI_LINT_OPTS ?= --modules-download-mode=mod
 .ONESHELL:
 SHELL := /bin/bash
 
-.PHONY: ensure-golint golint run run-verbose build test benchmark reindex status
+.PHONY: ensure-golint golint run run-verbose build test benchmark index status
 
 ensure-golint:
 	@{ set -euo pipefail; \
@@ -98,9 +98,9 @@ benchmark:
 	@set -euo pipefail
 	@( ./scripts/benchmark.sh )
 
-reindex:
+index:
 	@set -euo pipefail
-	@(curl --unix-socket /var/run/indexer.sock -X POST http://localhost/reindex)
+	@(curl --unix-socket /var/run/indexer.sock -X POST http://localhost/index)
 
 status:
 	@set -euo pipefail

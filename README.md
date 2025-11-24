@@ -7,7 +7,7 @@ Streaming filesystem indexer daemon that snapshots directory trees into SQLite a
 - Daemonized HTTP API on a Unix socket by default; optional TCP listener for remote access.
 - Streaming writes to SQLite (500-entry batches) to keep memory low (~150 MB for ~1M files).
 - Hardlink-aware size accounting so totals match `du`; deleted entries are cleaned after each run.
-- Auto-reindex on a fixed interval plus manual `/reindex` endpoint; hidden file support is opt-in.
+- Auto-index on a fixed interval plus manual `/index` endpoint; hidden file support is opt-in.
 - WAL-enabled SQLite schema with a small store layer for search, dirsize, and path queries.
 
 ## Quickstart
@@ -18,7 +18,7 @@ go build -o indexer .
 
 # Health and basic queries
 curl --unix-socket /tmp/indexer.sock http://localhost/status
-curl --unix-socket /tmp/indexer.sock -X POST http://localhost/reindex
+curl --unix-socket /tmp/indexer.sock -X POST http://localhost/index
 curl --unix-socket /tmp/indexer.sock 'http://localhost/search?q=log&limit=20'
 ```
 
@@ -34,19 +34,19 @@ Add `--listen :8080` to expose the API over TCP instead of (or alongside) the Un
 | `--db-path` | `/tmp/indexer.db` | SQLite database path (or `$INDEXER_DB_PATH`) |
 | `--socket-path` | `/var/run/indexer.sock` | Unix socket path for API |
 | `--listen` | *(disabled)* | TCP address for HTTP API (e.g., `:8080`) |
-| `--interval` | `0` (off) | Auto-reindex interval (`6h`, `30m`, etc.) |
+| `--interval` | `0` (off) | Auto-index interval (`6h`, `30m`, etc.) |
 | `--verbose` | `false` | Enable debug logging |
 
 ## API
 
 HTTP is served on the Unix socket (default) or on the TCP listener if `--listen` is set. The same JSON schema is returned in both cases.
 
-### `POST /reindex`
+### `POST /index`
 
-Trigger a full reindex in the background.
+Trigger a full index in the background.
 
 ```bash
-curl --unix-socket /tmp/indexer.sock -X POST http://localhost/reindex
+curl --unix-socket /tmp/indexer.sock -X POST http://localhost/index
 ```
 
 Response: `{"status":"running"}` with `202 Accepted`. Returns `409 Conflict` if an index is already running.
@@ -110,7 +110,7 @@ curl --unix-socket /tmp/indexer.sock -X POST http://localhost/add \
 
 Response: `{"status":"ok"}`.
 
-Both `/add` and `/delete` update ancestor directory sizes so folder totals stay correct between full reindexes.
+Both `/add` and `/delete` update ancestor directory sizes so folder totals stay correct between full indexing runs.
 
 ### `DELETE /delete?path=<path>`
 
@@ -234,7 +234,7 @@ WantedBy=multi-user.target
 
 - Runs with invoking user permissions (use `root` for full system coverage).
 - Single writer; multiple readers supported via WAL.
-- Filesystem changes between scans are not watched automatically; reindex or use `/add`/`/delete` to keep the index aligned with file operations.
+- Filesystem changes between scans are not watched automatically; run an index or use `/add`/`/delete` to keep the index aligned with file operations.
 - Symlinks are resolved to targets; `/proc`, `/dev`, and network mounts are skipped on Linux.
 
 ## License

@@ -272,7 +272,7 @@ func (d *daemon) startScheduler(ctx context.Context) {
 func (d *daemon) startHTTP(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/openapi.json", serveOpenapi)
-	mux.HandleFunc("/reindex", d.handleReindex)
+	mux.HandleFunc("/index", d.handleIndex)
 	mux.HandleFunc("/status", d.handleStatus)
 	mux.HandleFunc("/search", d.handleSearch)
 	mux.HandleFunc("/dirsize", d.handleDirSize)
@@ -355,12 +355,12 @@ func (d *daemon) runIndexOnce(ctx context.Context) error {
 	return d.runIndexSubprocess(ctx)
 }
 
-// runIndexSubprocess spawns the current binary with --reindex-mode flag
+// runIndexSubprocess spawns the current binary with --index-mode flag
 // Uses systemd-run --scope to isolate memory accounting from the daemon's cgroup
 func (d *daemon) runIndexSubprocess(ctx context.Context) error {
 	// Build args for the index binary
 	args := []string{
-		"--reindex-mode",
+		"--index-mode",
 		"--path", d.cfg.IndexPath,
 		"--name", d.cfg.IndexName,
 		"--db-path", d.cfg.DBPath,
@@ -404,7 +404,7 @@ func (d *daemon) runIndexSubprocess(ctx context.Context) error {
 	return nil
 }
 
-func (d *daemon) handleReindex(w http.ResponseWriter, r *http.Request) {
+func (d *daemon) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "use POST", http.StatusMethodNotAllowed)
 		return
@@ -423,7 +423,7 @@ func (d *daemon) handleReindex(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"running"}`))
 }
 
-// RunIndexMode is called from main when --reindex-mode flag is set
+// RunIndexMode is called from main when --index-mode flag is set
 // It performs the index and exits (releasing all memory including leaks)
 func RunIndexMode(indexName, indexPath string, includeHidden bool, dbPath string, verbose bool) {
 	logger.Infof("Running in index mode: path=%s name=%s db=%s", indexPath, indexName, dbPath)
@@ -948,7 +948,7 @@ const openapiSpec = `{
   "openapi": "3.0.0",
   "info": { "title": "Indexer API", "version": "1.0.0" },
   "paths": {
-    "/reindex": { "post": { "summary": "Trigger reindex", "responses": { "202": {"description": "Started"}, "409": {"description": "Already running"} } } },
+    "/index": { "post": { "summary": "Trigger index", "responses": { "202": {"description": "Started"}, "409": {"description": "Already running"} } } },
     "/status": { "get": { "summary": "Get status", "responses": { "200": {"description": "Status"} } } },
     "/search": { "get": { "summary": "Search entries", "parameters": [{ "in": "query", "name": "q", "schema": {"type": "string"} }, { "in": "query", "name": "limit", "schema": {"type": "integer"} }], "responses": { "200": {"description": "Results"} } } },
     "/dirsize": { "get": { "summary": "Directory size", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"} }], "responses": { "200": {"description": "Size"} } } },

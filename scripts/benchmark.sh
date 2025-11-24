@@ -13,7 +13,7 @@ SOCKET_PATH="${SOCKET_PATH:-/tmp/benchmark_indexer.sock}"
 LISTEN_ADDR="${LISTEN_ADDR:-}"
 INCLUDE_HIDDEN="${INCLUDE_HIDDEN:-true}"
 OUTPUT_FILE="${OUTPUT_FILE:-benchmark.md}"
-RUN_REINDEX="${RUN_REINDEX:-true}"
+RUN_INDEX="${RUN_INDEX:-true}"
 TOP_SNAPSHOT="${TOP_SNAPSHOT:-true}"
 DATASET_DIR="${DATASET_DIR:-}"
 DATASET_FILES="${DATASET_FILES:-1000}"
@@ -105,7 +105,7 @@ prepare_dataset() {
     log_info "Created $DATASET_FILES files"
 }
 
-mutate_dataset_for_reindex() {
+mutate_dataset_for_index() {
     if [ "$DATASET_DIR" = "/" ] || [ -z "$DATASET_DIR" ]; then
         log_error "Refusing to mutate unsafe DATASET_DIR: '$DATASET_DIR'"
         exit 1
@@ -119,7 +119,7 @@ mutate_dataset_for_reindex() {
                 ;;
         esac
     fi
-    log_step "Mutating dataset for reindex (deleting files)"
+    log_step "Mutating dataset for index (deleting files)"
     find "$DATASET_DIR" -maxdepth 1 -type f -delete
     log_info "Deleted files in $DATASET_DIR"
 }
@@ -234,9 +234,9 @@ run_benchmark() {
     fi
 
     local log_file="/tmp/benchmark_${safe_scenario}.log"
-    local cmd=( "$INDEXER_PATH" --reindex-mode --path "$TEST_PATH" --db-path "$DB_PATH" $hidden_flag --verbose )
+    local cmd=( "$INDEXER_PATH" --index-mode --path "$TEST_PATH" --db-path "$DB_PATH" $hidden_flag --verbose )
 
-    log_info "Starting direct reindex: ${cmd[*]}"
+    log_info "Starting direct index: ${cmd[*]}"
 
     local start_time
     start_time=$(date +%s.%N)
@@ -357,7 +357,7 @@ generate_report() {
 ## Scenarios
 
 - Fresh DB: index from scratch with no existing database
-- Reindex (After Deletions): rerun after removing synthetic files (optional)
+- Index (After Deletions): rerun after removing synthetic files (optional)
 EOF
 
     local results
@@ -375,7 +375,7 @@ EOF
     while IFS='|' read -r scenario duration idle_mem max_mem avg_mem total dirs files db_size deleted; do
         echo "### $scenario"
         echo "- Duration: ${duration}s"
-        echo "- Idle Memory: ${idle_mem} MB (after startup, before reindex)"
+        echo "- Idle Memory: ${idle_mem} MB (after startup, before index)"
         echo "- Max Memory: ${max_mem} MB"
         echo "- Avg Memory: ${avg_mem} MB"
         echo "- Entries: $total (dirs $dirs, files $files)"
@@ -428,12 +428,12 @@ main() {
     # Scenario 1: Fresh DB
     run_benchmark "Fresh DB" false
 
-    # Scenario 2: Reindex (no changes)
-    if [ "$RUN_REINDEX" = "true" ]; then
-        mutate_dataset_for_reindex
-        run_benchmark "Reindex (After Deletions)" true
+    # Scenario 2: Index (after deletions)
+    if [ "$RUN_INDEX" = "true" ]; then
+        mutate_dataset_for_index
+        run_benchmark "Index (After Deletions)" true
     else
-        log_warn "Skipping reindex scenario (set RUN_REINDEX=true to enable)"
+        log_warn "Skipping index-after-deletions scenario (set RUN_INDEX=true to enable)"
     fi
 
     # Generate report

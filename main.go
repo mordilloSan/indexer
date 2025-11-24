@@ -16,15 +16,15 @@ import (
 
 func main() {
 	var (
-		reindexMode     = flag.Bool("reindex-mode", false, "Internal: run reindex and exit (spawned by daemon)")
-		indexPath       = flag.String("path", "", "Path to index (required)")
-		indexName       = flag.String("name", "", "Name for this index (defaults to sanitized path)")
-		includeHidden   = flag.Bool("include-hidden", false, "Include hidden files and directories")
-		dbPath          = flag.String("db-path", "", "SQLite database path (overrides INDEXER_DB_PATH)")
-		socketPath      = flag.String("socket-path", "/var/run/indexer.sock", "Unix socket path")
-		listenAddr      = flag.String("listen", "", "Optional TCP address (e.g., :8080)")
-		reindexInterval = flag.String("interval", "1h", "Auto-reindex interval (Go duration like 6h, 30m); 0 disables")
-		verbose         = flag.Bool("verbose", false, "Enable verbose logging")
+		indexMode     = flag.Bool("index-mode", false, "Internal: run index and exit (spawned by daemon)")
+		indexPath     = flag.String("path", "", "Path to index (required)")
+		indexName     = flag.String("name", "", "Name for this index (defaults to sanitized path)")
+		includeHidden = flag.Bool("include-hidden", false, "Include hidden files and directories")
+		dbPath        = flag.String("db-path", "", "SQLite database path (overrides INDEXER_DB_PATH)")
+		socketPath    = flag.String("socket-path", "/var/run/indexer.sock", "Unix socket path")
+		listenAddr    = flag.String("listen", "", "Optional TCP address (e.g., :8080)")
+		indexInterval = flag.String("interval", "1h", "Auto-index interval (Go duration like 6h, 30m); 0 disables")
+		verbose       = flag.Bool("verbose", false, "Enable verbose logging")
 	)
 	flag.Parse()
 
@@ -39,8 +39,8 @@ func main() {
 	nameVal := sanitizeName(*indexName, *indexPath)
 	dbVal := coalesce(*dbPath, os.Getenv("INDEXER_DB_PATH"), "/tmp/indexer.db")
 
-	// If running in reindex mode, do index and exit
-	if *reindexMode {
+	// If running in index mode, do index and exit
+	if *indexMode {
 		cmd.RunIndexMode(nameVal, *indexPath, *includeHidden, dbVal, *verbose)
 		return
 	}
@@ -52,9 +52,9 @@ func main() {
 	}
 	listenVal := *listenAddr
 
-	interval, err := parseInterval(*reindexInterval)
+	interval, err := parseInterval(*indexInterval)
 	if err != nil {
-		logger.Warnf("Invalid interval %q, defaulting to 0 (disabled): %v", *reindexInterval, err)
+		logger.Warnf("Invalid interval %q, defaulting to 0 (disabled): %v", *indexInterval, err)
 		interval = 0
 	}
 
