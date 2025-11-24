@@ -2,12 +2,84 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/mordilloSan/indexer/indexing"
 )
+
+// testHelper provides helper methods for storage size update tests.
+type testHelper struct {
+	t       *testing.T
+	ctx     context.Context
+	db      *sql.DB
+	indexID int64
+}
+
+func (h *testHelper) seedDir(relPath string) {
+	h.t.Helper()
+	entry := indexing.IndexEntry{
+		RelativePath: relPath,
+		AbsolutePath: relPath,
+		Name:         filepath.Base(relPath),
+		Size:         0,
+		ModTime:      time.Now(),
+		Type:         "directory",
+		Hidden:       false,
+		IsDir:        true,
+		Inode:        0,
+	}
+	if relPath == "/" {
+		entry.Name = "/"
+	}
+	if _, err := UpdateEntry(h.ctx, h.db, h.indexID, entry); err != nil {
+		h.t.Fatalf("seed dir %s: %v", relPath, err)
+	}
+}
+
+func (h *testHelper) getSize(relPath string) int64 {
+	h.t.Helper()
+	var size int64
+	err := h.db.QueryRowContext(h.ctx, `SELECT size FROM entries WHERE index_id = ? AND relative_path = ?`, h.indexID, relPath).Scan(&size)
+	if err != nil {
+		h.t.Fatalf("query size %s: %v", relPath, err)
+	}
+	return size
+}
+
+func (h *testHelper) assertSize(relPath string, want int64, desc string) {
+	h.t.Helper()
+	if got := h.getSize(relPath); got != want {
+		h.t.Fatalf("%s: size at %s = %d, want %d", desc, relPath, got, want)
+	}
+}
+
+func (h *testHelper) upsertFile(entry indexing.IndexEntry) {
+	h.t.Helper()
+	if err := UpsertEntryWithSizeUpdate(h.ctx, h.db, h.indexID, entry); err != nil {
+		h.t.Fatalf("upsert file: %v", err)
+	}
+}
+
+func (h *testHelper) deleteFile(relPath string) {
+	h.t.Helper()
+	if err := DeleteEntryWithSizeUpdate(h.ctx, h.db, h.indexID, relPath); err != nil {
+		h.t.Fatalf("delete file: %v", err)
+	}
+}
+
+func (h *testHelper) assertFileDeleted(relPath string) {
+	h.t.Helper()
+	var count int
+	if err := h.db.QueryRowContext(h.ctx, `SELECT COUNT(*) FROM entries WHERE index_id = ? AND relative_path = ?`, h.indexID, relPath).Scan(&count); err != nil {
+		h.t.Fatalf("count file row: %v", err)
+	}
+	if count != 0 {
+		h.t.Fatalf("file row still present after delete (count=%d)", count)
+	}
+}
 
 // Integration-style test to ensure manual add/delete operations keep ancestor sizes in sync.
 func TestUpsertAndDeletePropagatesSizes(t *testing.T) {
@@ -41,37 +113,11 @@ func TestUpsertAndDeletePropagatesSizes(t *testing.T) {
 		t.Fatalf("index id: %v", err)
 	}
 
-	// Seed root and a child directory so parent size updates have somewhere to land.
-	seedDir := func(relPath string) {
-		entry := indexing.IndexEntry{
-			RelativePath: relPath,
-			AbsolutePath: relPath,
-			Name:         filepath.Base(relPath),
-			Size:         0,
-			ModTime:      time.Now(),
-			Type:         "directory",
-			Hidden:       false,
-			IsDir:        true,
-			Inode:        0,
-		}
-		if relPath == "/" {
-			entry.Name = "/"
-		}
-		if _, err := UpdateEntry(ctx, db, indexID, entry); err != nil {
-			t.Fatalf("seed dir %s: %v", relPath, err)
-		}
-	}
-	seedDir("/")
-	seedDir("/data")
+	h := &testHelper{t: t, ctx: ctx, db: db, indexID: indexID}
 
-	getSize := func(relPath string) int64 {
-		var size int64
-		err := db.QueryRowContext(ctx, `SELECT size FROM entries WHERE index_id = ? AND relative_path = ?`, indexID, relPath).Scan(&size)
-		if err != nil {
-			t.Fatalf("query size %s: %v", relPath, err)
-		}
-		return size
-	}
+	// Seed root and a child directory so parent size updates have somewhere to land.
+	h.seedDir("/")
+	h.seedDir("/data")
 
 	fileEntry := indexing.IndexEntry{
 		RelativePath: "/data/file.txt",
@@ -85,45 +131,19 @@ func TestUpsertAndDeletePropagatesSizes(t *testing.T) {
 		Inode:        1,
 	}
 
-	if err := UpsertEntryWithSizeUpdate(ctx, db, indexID, fileEntry); err != nil {
-		t.Fatalf("upsert file: %v", err)
-	}
-
-	if got := getSize("/data"); got != 200 {
-		t.Fatalf("dir size after add = %d, want 200", got)
-	}
-	if got := getSize("/"); got != 200 {
-		t.Fatalf("root size after add = %d, want 200", got)
-	}
+	h.upsertFile(fileEntry)
+	h.assertSize("/data", 200, "after add")
+	h.assertSize("/", 200, "after add")
 
 	// Increase file size and ensure deltas propagate.
 	fileEntry.Size = 350
-	if err := UpsertEntryWithSizeUpdate(ctx, db, indexID, fileEntry); err != nil {
-		t.Fatalf("upsert file (resize): %v", err)
-	}
-	if got := getSize("/data"); got != 350 {
-		t.Fatalf("dir size after resize = %d, want 350", got)
-	}
-	if got := getSize("/"); got != 350 {
-		t.Fatalf("root size after resize = %d, want 350", got)
-	}
+	h.upsertFile(fileEntry)
+	h.assertSize("/data", 350, "after resize")
+	h.assertSize("/", 350, "after resize")
 
 	// Delete and ensure sizes drop.
-	if err := DeleteEntryWithSizeUpdate(ctx, db, indexID, "/data/file.txt"); err != nil {
-		t.Fatalf("delete file: %v", err)
-	}
-	if got := getSize("/data"); got != 0 {
-		t.Fatalf("dir size after delete = %d, want 0", got)
-	}
-	if got := getSize("/"); got != 0 {
-		t.Fatalf("root size after delete = %d, want 0", got)
-	}
-
-	var count int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM entries WHERE index_id = ? AND relative_path = ?`, indexID, "/data/file.txt").Scan(&count); err != nil {
-		t.Fatalf("count file row: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("file row still present after delete (count=%d)", count)
-	}
+	h.deleteFile("/data/file.txt")
+	h.assertSize("/data", 0, "after delete")
+	h.assertSize("/", 0, "after delete")
+	h.assertFileDeleted("/data/file.txt")
 }

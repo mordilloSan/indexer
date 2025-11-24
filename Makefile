@@ -7,11 +7,12 @@ GOLANGCI_LINT_MODULE  := github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 GOLANGCI_LINT_VERSION ?= latest
 GOLANGCI_LINT         := $(GO_INSTALL_DIR)/bin/golangci-lint
 GOLANGCI_LINT_OPTS ?= --modules-download-mode=mod
+GOCYCLO               := $(GO_INSTALL_DIR)/bin/gocyclo
 
 .ONESHELL:
 SHELL := /bin/bash
 
-.PHONY: ensure-golint golint run run-verbose build test benchmark index status
+.PHONY: ensure-golint ensure-gocyclo golint run run-verbose build test benchmark index status
 
 ensure-golint:
 	@{ set -euo pipefail; \
@@ -38,7 +39,14 @@ ensure-golint:
 	   echo "golangci-lint v2 ready."; \
 	}
 
-golint: ensure-golint
+ensure-gocyclo:
+	@if [ ! -x "$(GOCYCLO)" ]; then \
+	  echo "Installing gocyclo..."; \
+	  GOBIN="$(GO_INSTALL_DIR)/bin" "$(GO_BIN)" install github.com/fzipp/gocyclo/cmd/gocyclo@latest; \
+	fi
+	@echo "gocyclo ready."
+
+golint: ensure-golint ensure-gocyclo
 	@set -euo pipefail
 	@echo "Linting Go module in: $(BACKEND_DIR)"
 	@echo "Running gofmt..."
@@ -52,6 +60,8 @@ endif
 	@( cd "$(BACKEND_DIR)" && go mod tidy && go mod download )
 	@echo "Running golangci-lint..."
 	@( cd "$(BACKEND_DIR)" && "$(GOLANGCI_LINT)" run --fix ./... --timeout 3m $(GOLANGCI_LINT_OPTS) )
+	@echo "Running gocyclo (complexity check)..."
+	@( cd "$(BACKEND_DIR)" && "$(GOCYCLO)" -over 15 . )
 	@echo "Go Linting complete!"
 
 run: build
