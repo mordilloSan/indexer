@@ -258,3 +258,13 @@ func (s *Store) GetStats() (*Stats, error) {
 
 	return &stats, nil
 }
+
+// UpsertEntryWithSizeUpdate updates an entry and propagates size changes to parents.
+func (s *Store) UpsertEntryWithSizeUpdate(ctx context.Context, indexID int64, entry indexing.IndexEntry) error {
+	return UpsertEntryWithSizeUpdate(ctx, s.db, indexID, entry)
+}
+
+// DeleteEntryWithSizeUpdate deletes an entry and propagates size changes to parents.
+func (s *Store) DeleteEntryWithSizeUpdate(ctx context.Context, indexID int64, relativePath string) error {
+	return DeleteEntryWithSizeUpdate(ctx, s.db, indexID, relativePath)
+}

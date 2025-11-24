@@ -28,7 +28,8 @@ func TestHandleAddAndDelete(t *testing.T) {
 			IndexName: "test",
 			IndexPath: "/",
 		},
-		db: db,
+		db:    db,
+		store: storage.NewStoreWithDB(db),
 	}
 
 	// Seed an index row so latestIndexID works.

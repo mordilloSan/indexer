@@ -11,8 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -36,10 +34,12 @@ type DaemonConfig struct {
 }
 
 type daemon struct {
-	cfg     DaemonConfig
-	db      *sql.DB
-	servers []*http.Server
-	running atomic.Bool
+	cfg             DaemonConfig
+	db              *sql.DB
+	store           *storage.Store
+	servers         []*http.Server
+	running         atomic.Bool
+	usedSystemdSock bool
 }
 
 func NewDaemon(cfg DaemonConfig) (*daemon, error) {
@@ -80,8 +80,9 @@ func NewDaemon(cfg DaemonConfig) (*daemon, error) {
 	}
 
 	return &daemon{
-		cfg: cfg,
-		db:  db,
+		cfg:   cfg,
+		db:    db,
+		store: storage.NewStoreWithDB(db),
 	}, nil
 }
 
@@ -106,7 +107,7 @@ func (d *daemon) Close() {
 	}
 
 	// Remove Unix socket only if we created it (not systemd-managed)
-	if d.cfg.SocketPath != "" && !isSystemdSocket() {
+	if d.cfg.SocketPath != "" && !d.usedSystemdSock {
 		if err := os.Remove(d.cfg.SocketPath); err != nil && !os.IsNotExist(err) {
 			logger.Warnf("Failed to remove socket: %v", err)
 		}
@@ -116,32 +117,34 @@ func (d *daemon) Close() {
 }
 
 // getUnixListener returns a Unix socket listener, preferring systemd socket activation
-func (d *daemon) getUnixListener() (net.Listener, bool, error) {
+func (d *daemon) getUnixListener() (net.Listener, error) {
 	// Try systemd socket activation first
 	if l := systemdUnixListener(); l != nil {
-		return l, true, nil
+		d.usedSystemdSock = true
+		return l, nil
 	}
 
 	// Fallback: create socket manually
+	d.usedSystemdSock = false
 	if err := os.Remove(d.cfg.SocketPath); err != nil && !os.IsNotExist(err) {
-		return nil, false, fmt.Errorf("remove stale socket: %w", err)
+		return nil, fmt.Errorf("remove stale socket: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(d.cfg.SocketPath), 0o755); err != nil {
-		return nil, false, fmt.Errorf("mkdir socket dir: %w", err)
+		return nil, fmt.Errorf("mkdir socket dir: %w", err)
 	}
 
 	l, err := net.Listen("unix", d.cfg.SocketPath)
 	if err != nil {
-		return nil, false, fmt.Errorf("listen on unix socket: %w", err)
+		return nil, fmt.Errorf("listen on unix socket: %w", err)
 	}
 	if err := os.Chmod(d.cfg.SocketPath, 0o666); err != nil {
 		if closeErr := l.Close(); closeErr != nil {
 			logger.Warnf("Failed to close listener after chmod error: %v", closeErr)
 		}
-		return nil, false, fmt.Errorf("chmod socket: %w", err)
+		return nil, fmt.Errorf("chmod socket: %w", err)
 	}
 
-	return l, false, nil
+	return l, nil
 }
 
 // systemdUnixListener checks for systemd socket activation and returns the listener if available
@@ -193,16 +196,9 @@ func systemdUnixListener() net.Listener {
 	return l
 }
 
-// isSystemdSocket checks if we're using systemd socket activation
-func isSystemdSocket() bool {
-	pid := os.Getenv("LISTEN_PID")
-	fds := os.Getenv("LISTEN_FDS")
-	return pid != "" && fds != ""
-}
-
 // Run starts the scheduler (if any) and HTTP server, blocks until context is cancelled
 func (d *daemon) Run(ctx context.Context) error {
-	// Trigger initial index if database is empty
+	// Start periodic indexing scheduler if configured
 	if d.cfg.Interval > 0 {
 		go d.startScheduler(ctx)
 	}
@@ -287,7 +283,7 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 
 	// Unix socket listener - try systemd socket activation first
 	if d.cfg.SocketPath != "" {
-		l, isSystemd, err := d.getUnixListener()
+		l, err := d.getUnixListener()
 		if err != nil {
 			return err
 		}
@@ -295,7 +291,7 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 		srv := &http.Server{Handler: mux, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second}
 		d.servers = append(d.servers, srv)
 		serverCount++
-		if isSystemd {
+		if d.usedSystemdSock {
 			logger.Infof("API listening on unix://%s (systemd socket activation)", d.cfg.SocketPath)
 		} else {
 			logger.Infof("API listening on unix://%s", d.cfg.SocketPath)
@@ -505,19 +501,6 @@ func runIndex(ctx context.Context, db *sql.DB, indexName, indexPath string, incl
 		index.GetTotalSize(),
 	)
 
-	// Free memory from Index's internal maps
-	index.Cleanup()
-
-	// Release SQLite internal caches
-	if err := storage.ReleaseSQLiteMemory(ctx, db); err != nil {
-		logger.Warnf("Failed to release SQLite memory: %v", err)
-	}
-
-	// Aggressively reclaim memory
-	runtime.GC()
-	debug.FreeOSMemory()
-	runtime.GC()
-
 	return nil
 }
 
@@ -593,15 +576,7 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get database statistics from the most recent index
-	var numDirs, numFiles, totalSize sql.NullInt64
-	var lastIndexed sql.NullInt64
-	err := d.db.QueryRowContext(ctx, `
-		SELECT num_dirs, num_files, total_size, last_indexed
-		FROM indexes
-		ORDER BY last_indexed DESC
-		LIMIT 1
-	`).Scan(&numDirs, &numFiles, &totalSize, &lastIndexed)
-
+	li, err := loadLatestIndex(ctx, d.db)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		// no data yet; keep defaults
@@ -609,17 +584,11 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("error loading status: %v", err), http.StatusInternalServerError)
 		return
 	default:
-		if numDirs.Valid {
-			stats.NumDirs = numDirs.Int64
-		}
-		if numFiles.Valid {
-			stats.NumFiles = numFiles.Int64
-		}
-		if totalSize.Valid {
-			stats.TotalSize = totalSize.Int64
-		}
-		if lastIndexed.Valid && lastIndexed.Int64 > 0 {
-			stats.LastIndexed = time.Unix(lastIndexed.Int64, 0).UTC().Format(time.RFC3339)
+		stats.NumDirs = li.NumDirs
+		stats.NumFiles = li.NumFiles
+		stats.TotalSize = li.TotalSize
+		if li.LastIndexed.Valid && li.LastIndexed.Int64 > 0 {
+			stats.LastIndexed = time.Unix(li.LastIndexed.Int64, 0).UTC().Format(time.RFC3339)
 		}
 	}
 
@@ -628,14 +597,8 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 func (d *daemon) handleSearch(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
-	limit := 100
-	if l := r.URL.Query().Get("limit"); l != "" {
-		if v, err := strconv.Atoi(l); err == nil && v > 0 {
-			limit = v
-		}
-	}
-	store := storage.NewStoreWithDB(d.db)
-	results, err := store.SearchEntries(q, limit)
+	limit := queryInt(r.URL.Query().Get("limit"), 100, 1)
+	results, err := d.store.SearchEntries(q, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -644,26 +607,12 @@ func (d *daemon) handleSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *daemon) handleEntries(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Query().Get("path")
-	if path == "" {
-		path = "/"
-	}
+	path := queryPathOrRoot(r.URL.Query().Get("path"))
 	recursive := r.URL.Query().Get("recursive") == "true"
-	limit := 200
-	offset := 0
-	if l := r.URL.Query().Get("limit"); l != "" {
-		if v, err := strconv.Atoi(l); err == nil && v > 0 {
-			limit = v
-		}
-	}
-	if o := r.URL.Query().Get("offset"); o != "" {
-		if v, err := strconv.Atoi(o); err == nil && v >= 0 {
-			offset = v
-		}
-	}
+	limit := queryInt(r.URL.Query().Get("limit"), 200, 1)
+	offset := queryInt(r.URL.Query().Get("offset"), 0, 0)
 
-	store := storage.NewStoreWithDB(d.db)
-	results, err := store.QueryPath(path, recursive, limit, offset)
+	results, err := d.store.QueryPath(path, recursive, limit, offset)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -672,12 +621,8 @@ func (d *daemon) handleEntries(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *daemon) handleDirSize(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Query().Get("path")
-	if path == "" {
-		path = "/"
-	}
-	store := storage.NewStoreWithDB(d.db)
-	total, err := store.DirSize(path)
+	path := queryPathOrRoot(r.URL.Query().Get("path"))
+	total, err := d.store.DirSize(path)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -685,7 +630,7 @@ func (d *daemon) handleDirSize(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{
 		"path":  path,
 		"size":  total,
-		"bytes": total,
+		"bytes": total, // backwards compatibility
 	})
 }
 
@@ -715,8 +660,7 @@ func (d *daemon) handleAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	store := storage.NewStoreWithDB(d.db)
-	indexID, err := store.LatestIndexID(ctx)
+	indexID, err := d.store.LatestIndexID(ctx)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("no index present: %v", err), http.StatusBadRequest)
 		return
@@ -752,7 +696,7 @@ func (d *daemon) handleAdd(w http.ResponseWriter, r *http.Request) {
 		Inode:        payload.Inode,
 	}
 
-	if err := storage.UpsertEntryWithSizeUpdate(ctx, d.db, indexID, entry); err != nil {
+	if err := d.store.UpsertEntryWithSizeUpdate(ctx, indexID, entry); err != nil {
 		http.Error(w, fmt.Sprintf("upsert failed: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -771,15 +715,14 @@ func (d *daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	store := storage.NewStoreWithDB(d.db)
-	indexID, err := store.LatestIndexID(ctx)
+	indexID, err := d.store.LatestIndexID(ctx)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("no index present: %v", err), http.StatusBadRequest)
 		return
 	}
 
 	relPath := indexing.NormalizeIndexPath(path)
-	if err := storage.DeleteEntryWithSizeUpdate(ctx, d.db, indexID, relPath); err != nil {
+	if err := d.store.DeleteEntryWithSizeUpdate(ctx, indexID, relPath); err != nil {
 		http.Error(w, fmt.Sprintf("delete failed: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -789,6 +732,26 @@ func (d *daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// queryInt parses an integer query parameter with default and minimum value
+func queryInt(q string, def int, min int) int {
+	if q == "" {
+		return def
+	}
+	v, err := strconv.Atoi(q)
+	if err != nil || v < min {
+		return def
+	}
+	return v
+}
+
+// queryPathOrRoot returns the path query parameter or "/" if empty
+func queryPathOrRoot(path string) string {
+	if path == "" {
+		return "/"
+	}
+	return path
 }
 
 // Minimal OpenAPI spec served at /openapi.json
@@ -863,48 +826,68 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-func logLatestIndexStatus(db *sql.DB) {
+// LatestIndex represents the most recent index metadata
+type LatestIndex struct {
+	Name        string
+	NumDirs     int64
+	NumFiles    int64
+	TotalSize   int64
+	LastIndexed sql.NullInt64
+}
+
+// loadLatestIndex fetches the most recent index metadata from the database
+func loadLatestIndex(ctx context.Context, db *sql.DB) (*LatestIndex, error) {
+	var li LatestIndex
 	var name sql.NullString
-	var lastIndexed sql.NullInt64
-	var numDirs, numFiles sql.NullInt64
-	err := db.QueryRow(`
-		SELECT name, last_indexed, num_dirs, num_files
+	var numDirs, numFiles, totalSize sql.NullInt64
+
+	err := db.QueryRowContext(ctx, `
+		SELECT name, num_dirs, num_files, total_size, last_indexed
 		FROM indexes
 		ORDER BY last_indexed DESC
-		LIMIT 1;
-	`).Scan(&name, &lastIndexed, &numDirs, &numFiles)
+		LIMIT 1
+	`).Scan(&name, &numDirs, &numFiles, &totalSize, &li.LastIndexed)
+	if err != nil {
+		return nil, err
+	}
+
+	if name.Valid {
+		li.Name = name.String
+	}
+	if numDirs.Valid {
+		li.NumDirs = numDirs.Int64
+	}
+	if numFiles.Valid {
+		li.NumFiles = numFiles.Int64
+	}
+	if totalSize.Valid {
+		li.TotalSize = totalSize.Int64
+	}
+
+	return &li, nil
+}
+
+func logLatestIndexStatus(db *sql.DB) {
+	ctx := context.Background()
+	li, err := loadLatestIndex(ctx, db)
 
 	switch err {
 	case nil:
 		last := "unknown"
-		if lastIndexed.Valid && lastIndexed.Int64 > 0 {
-			last = time.Unix(lastIndexed.Int64, 0).UTC().Format(time.RFC3339)
+		if li.LastIndexed.Valid && li.LastIndexed.Int64 > 0 {
+			last = time.Unix(li.LastIndexed.Int64, 0).UTC().Format(time.RFC3339)
 		}
 		logger.Infof("Latest index: name=%s last_indexed=%s dirs=%d files=%d",
-			nullStringOr(name, "<none>"),
+			li.Name,
 			last,
-			nullInt64Or(numDirs, 0),
-			nullInt64Or(numFiles, 0),
+			li.NumDirs,
+			li.NumFiles,
 		)
 	case sql.ErrNoRows:
 		logger.Infof("No prior index metadata found in database")
 	default:
 		logger.Warnf("Could not load latest index metadata: %v", err)
 	}
-}
-
-func nullStringOr(v sql.NullString, def string) string {
-	if v.Valid {
-		return v.String
-	}
-	return def
-}
-
-func nullInt64Or(v sql.NullInt64, def int64) int64 {
-	if v.Valid {
-		return v.Int64
-	}
-	return def
 }
 
 const openapiSpec = `{
