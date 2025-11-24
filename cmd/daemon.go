@@ -682,9 +682,8 @@ func (d *daemon) handleDirSize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]interface{}{
-		"path":  path,
-		"size":  total,
-		"bytes": total, // backwards compatibility
+		"path": path,
+		"size": total,
 	})
 }
 

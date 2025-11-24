@@ -95,7 +95,7 @@ curl --unix-socket /tmp/indexer.sock 'http://localhost/dirsize?path=/var'
 
 Response:
 ```json
-{"path":"/var","size":5368709120,"bytes":5368709120}
+{"path":"/var","size":5368709120}
 ```
 
 ### `POST /add`
@@ -193,35 +193,22 @@ Indexes: `idx_entries_index_id` on `index_id`, and `idx_entries_path` unique on 
 
 ## Systemd
 
-Example unit at `/etc/systemd/system/indexer.service`:
+An installation script is provided at `scripts/install_socket.sh` that automates the setup:
 
-```ini
-[Unit]
-Description=Filesystem Indexer Daemon
-After=network.target
-
-[Service]
-Type=simple
-User=root
-Environment="INDEXER_DB_PATH=/var/lib/indexer/data.db"
-ExecStart=/usr/local/bin/indexer \
-  --path /data \
-  --socket-path /var/run/indexer.sock \
-  --interval 6h \
-  --verbose
-Restart=on-failure
-RestartSec=10
-
-# Security hardening
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=/var/lib/indexer /var/run
-
-[Install]
-WantedBy=multi-user.target
+```bash
+sudo ./scripts/install_socket.sh
 ```
+
+The script performs the following steps:
+1. Builds the binary and installs it to `/usr/local/bin/indexer`
+2. Installs systemd service and socket units from the `systemd/` directory
+3. Creates `/etc/default/indexer` configuration file with environment variables
+4. Enables socket activation and starts the daemon
+5. Verifies the installation
+
+After installation, edit `/etc/default/indexer` to configure the path to index, interval, and other options. Systemd socket activation is used by default, so the daemon starts on-demand when the socket is accessed.
+
+Service files are available in the `systemd/` directory for reference.
 
 ## Performance
 
