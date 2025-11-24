@@ -1,3 +1,5 @@
+[![Go Report Card](https://goreportcard.com/badge/github.com/mordilloSan/indexer)](https://goreportcard.com/report/github.com/mordilloSan/indexer)
+
 # Indexer
 
 Streaming filesystem indexer daemon that snapshots directory trees into SQLite and exposes search/dirsize APIs over Unix sockets or TCP. Built for quick queries without re-walking the filesystem.
