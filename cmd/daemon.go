@@ -53,9 +53,10 @@ func NewDaemon(cfg DaemonConfig) (*daemon, error) {
 		}
 		cfg.IndexName = name
 	}
-	if cfg.SocketPath == "-" {
+	switch cfg.SocketPath {
+	case "-":
 		cfg.SocketPath = ""
-	} else if cfg.SocketPath == "" {
+	case "":
 		cfg.SocketPath = "/var/run/indexer.sock"
 	}
 	if cfg.DBPath == "" {
