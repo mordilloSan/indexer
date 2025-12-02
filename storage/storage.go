@@ -184,7 +184,8 @@ func Open(path string) (*sql.DB, error) {
 		path = defaultDBPath
 	}
 	// Use WAL for concurrent readers while streaming writes happen.
-	dsn := fmt.Sprintf("%s?_busy_timeout=%d&_foreign_keys=on&_journal_mode=WAL&_synchronous=NORMAL", path, busyTimeoutMS)
+	// synchronous=OFF for maximum write performance during indexing
+	dsn := fmt.Sprintf("%s?_busy_timeout=%d&_foreign_keys=on&_journal_mode=WAL&_synchronous=OFF", path, busyTimeoutMS)
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, err
