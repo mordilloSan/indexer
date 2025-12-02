@@ -195,10 +195,10 @@ Indexes: `idx_entries_index_id` on `index_id`, and `idx_entries_path` unique on 
 
 ## Systemd
 
-An installation script is provided at `scripts/install_socket.sh` that automates the setup:
+An installation script is provided at `scripts/global_install.sh` that automates the setup:
 
 ```bash
-sudo ./scripts/install_socket.sh
+sudo ./scripts/global_install.sh
 ```
 
 The script performs the following steps:
