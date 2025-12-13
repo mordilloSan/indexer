@@ -47,13 +47,25 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install arm64 cross-compiler (for CGO)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+
       - name: Build binaries
         run: |
           set -euo pipefail
           mkdir -p dist
+          VERSION="${{ steps.tag.outputs.tag }}"
+          COMMIT="$(git rev-parse --short HEAD)"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          LDFLAGS="-s -w -X github.com/mordilloSan/indexer/internal/version.Version=${VERSION} -X github.com/mordilloSan/indexer/internal/version.Commit=${COMMIT} -X github.com/mordilloSan/indexer/internal/version.Date=${DATE}"
           for arch in amd64 arm64; do
             echo "Building linux/$arch..."
-            GOOS=linux GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "dist/indexer-linux-${arch}" .
+            CC="gcc"
+            if [ "$arch" = "arm64" ]; then CC="aarch64-linux-gnu-gcc"; fi
+            GOOS=linux GOARCH="$arch" CGO_ENABLED=1 CC="$CC" go build -trimpath -ldflags "$LDFLAGS" -o "dist/indexer-linux-${arch}" .
           done
 
       - name: Package install assets

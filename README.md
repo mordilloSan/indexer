@@ -38,6 +38,9 @@ Add `--listen :8080` to expose the API over TCP instead of (or alongside) the Un
 | `--listen` | *(disabled)* | TCP address for HTTP API (e.g., `:8080`) |
 | `--interval` | `0` (off) | Auto-index interval (`6h`, `30m`, etc.) |
 | `--verbose` | `false` | Enable debug logging |
+| `--version` | `false` | Print version/build info and exit |
+
+On startup (CLI or systemd), `indexer` logs its version/build info.
 
 ## API
 

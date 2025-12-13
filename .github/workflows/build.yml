@@ -32,7 +32,11 @@ jobs:
       - name: Build binary
         run: |
           mkdir -p dist
-          go build -o dist/indexer-linux-amd64 .
+          VERSION="dev-${GITHUB_SHA::7}"
+          COMMIT="${GITHUB_SHA::7}"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          LDFLAGS="-X github.com/mordilloSan/indexer/internal/version.Version=${VERSION} -X github.com/mordilloSan/indexer/internal/version.Commit=${COMMIT} -X github.com/mordilloSan/indexer/internal/version.Date=${DATE}"
+          CGO_ENABLED=1 go build -trimpath -ldflags "$LDFLAGS" -o dist/indexer-linux-amd64 .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

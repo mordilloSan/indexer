@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"strings"
@@ -12,11 +13,13 @@ import (
 	"github.com/mordilloSan/go_logger/logger"
 
 	"github.com/mordilloSan/indexer/cmd"
+	"github.com/mordilloSan/indexer/internal/version"
 )
 
 func main() {
 	var (
 		indexMode     = flag.Bool("index-mode", false, "Internal: run index and exit (spawned by daemon)")
+		showVersion   = flag.Bool("version", false, "Print version and exit")
 		indexPath     = flag.String("path", "", "Path to index (required)")
 		indexName     = flag.String("name", "", "Name for this index (defaults to sanitized path)")
 		includeHidden = flag.Bool("include-hidden", false, "Include hidden files and directories")
@@ -28,7 +31,17 @@ func main() {
 	)
 	flag.Parse()
 
+	if *showVersion {
+		fmt.Println(version.String())
+		return
+	}
+
 	logger.Init("production", *verbose)
+	mode := "daemon"
+	if *indexMode {
+		mode = "index"
+	}
+	logger.Infof("%s starting mode=%s", version.String(), mode)
 
 	if *indexPath == "" {
 		logger.Errorf("Error: -path flag is required")

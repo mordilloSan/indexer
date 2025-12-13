@@ -6,6 +6,10 @@ BINARY := $(CURDIR)/$(BINARY_NAME)
 CACHE_ROOT := $(CURDIR)/.cache
 export GOCACHE := $(CACHE_ROOT)/go-build
 export GOMODCACHE := $(CACHE_ROOT)/gomod
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "")
+BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+LDFLAGS ?= -X github.com/mordilloSan/indexer/internal/version.Version=$(VERSION) -X github.com/mordilloSan/indexer/internal/version.Commit=$(GIT_COMMIT) -X github.com/mordilloSan/indexer/internal/version.Date=$(BUILD_DATE)
 GOLANGCI_LINT_MODULE  := github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 GOLANGCI_LINT_VERSION ?= latest
 GOLANGCI_LINT         := $(GO_INSTALL_DIR)/bin/golangci-lint
@@ -85,7 +89,7 @@ run-verbose:
 build:
 	@set -euo pipefail
 	@echo "Building indexer binary at $(BINARY)"
-	@( cd "$(BACKEND_DIR)" && $(GO_BIN) build -o "$(BINARY)" . )
+	@( cd "$(BACKEND_DIR)" && $(GO_BIN) build -ldflags "$(LDFLAGS)" -o "$(BINARY)" . )
 	@size="$$(stat -c '%s' "$(BINARY)")"; \
 	 human="$$(ls -lh "$(BINARY)" | awk '{print $$5}')"; \
 	 echo "Binary size: $$size bytes ($$human)"

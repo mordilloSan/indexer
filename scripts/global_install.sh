@@ -49,7 +49,11 @@ echo -e "${YELLOW}[1/5]${NC} Building indexer binary..."
 if command -v make &>/dev/null; then
     GO_BIN="$GO_BIN" make build
 else
-    "$GO_BIN" build -o indexer .
+    BUILD_VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+    BUILD_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || true)"
+    BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+    LDFLAGS="-X github.com/mordilloSan/indexer/internal/version.Version=${BUILD_VERSION} -X github.com/mordilloSan/indexer/internal/version.Commit=${BUILD_COMMIT} -X github.com/mordilloSan/indexer/internal/version.Date=${BUILD_DATE}"
+    "$GO_BIN" build -ldflags "$LDFLAGS" -o indexer .
 fi
 
 # Step 2: Install binary
