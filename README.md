@@ -276,6 +276,20 @@ The script performs the following steps:
 4. Enables socket activation and starts the daemon
 5. Verifies the installation
 
+### Install from GitHub Releases (no Go required)
+
+If you prefer not to build locally, use the release installer (downloads the prebuilt binary and systemd unit files from GitHub Releases):
+
+```bash
+curl -fsSL https://github.com/mordilloSan/indexer/releases/latest/download/indexer-install.sh | sudo bash
+```
+
+To install a specific version:
+
+```bash
+curl -fsSL https://github.com/mordilloSan/indexer/releases/download/v1.0.0/indexer-install.sh | sudo bash
+```
+
 After installation, edit `/etc/default/indexer` to configure the path to index, interval, and other options. Systemd socket activation is used by default, so the daemon starts on-demand when the socket is accessed.
 
 Service files are available in the `systemd/` directory for reference.
