@@ -24,16 +24,16 @@ jobs:
         run: |
           set -euo pipefail
           tag_input="${{ github.event.inputs.tag }}"
-          if [ -n "$tag_input" ]; then
-            echo "tag=$tag_input" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
+          tag="${tag_input:-${GITHUB_REF_NAME}}"
+          tag="${tag#refs/tags/}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "ref=refs/tags/$tag" >> "$GITHUB_OUTPUT"
 
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.tag.outputs.tag }}
+          ref: ${{ steps.tag.outputs.ref }}
+          fetch-depth: 0
 
       - name: Checkout installer template
         uses: actions/checkout@v4
