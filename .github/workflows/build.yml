@@ -23,6 +23,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install build deps (for CGO)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential libc6-dev
+
       - name: Install dependencies
         run: go mod download
 
