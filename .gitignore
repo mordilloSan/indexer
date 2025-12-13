@@ -1,0 +1,9 @@
+*.db
+*.bak
+*.log
+
+indexer
+.cache
+.vscode
+.go*
+.benchmark*

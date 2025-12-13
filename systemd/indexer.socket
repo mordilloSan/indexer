@@ -1,0 +1,12 @@
+[Unit]
+Description=Indexer API Socket
+PartOf=indexer.service
+
+[Socket]
+ListenStream=/var/run/indexer.sock
+SocketMode=0666
+SocketUser=root
+SocketGroup=root
+
+[Install]
+WantedBy=sockets.target
