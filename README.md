@@ -290,10 +290,42 @@ curl -fsSL https://github.com/mordilloSan/indexer/releases/latest/download/index
 To install a specific version:
 
 ```bash
-curl -fsSL https://github.com/mordilloSan/indexer/releases/download/v1.0.0/indexer-install.sh | sudo bash
+curl -fsSL https://github.com/mordilloSan/indexer/releases/download/v1.1.2/indexer-install.sh | sudo bash
 ```
 
 After installation, edit `/etc/default/indexer` to configure the path to index, interval, and other options. Systemd socket activation is used by default, so the daemon starts on-demand when the socket is accessed.
+
+### Configuration file (`/etc/default/indexer`)
+
+When you install via `scripts/global_install.sh` or the GitHub Release installer, the systemd unit reads `/etc/default/indexer` (if present) and uses it to set the daemon flags.
+
+Common settings:
+
+```bash
+# Filesystem root to index
+INDEXER_PATH=/data
+
+# Index name (identifier)
+INDEXER_NAME=data
+
+# Include dotfiles/dotdirs (true/false)
+INDEXER_INCLUDE_HIDDEN=false
+
+# SQLite DB path
+INDEXER_DB_PATH=/tmp/indexer.db
+
+# Auto-index interval (e.g., 6h, 30m); set 0 to disable
+INDEXER_INTERVAL=6h
+
+# Optional extra flags (quote if it contains spaces)
+INDEXER_LISTEN_FLAG="--listen :8080"
+```
+
+Apply changes:
+
+```bash
+sudo systemctl restart indexer.service
+```
 
 Service files are available in the `systemd/` directory for reference.
 
