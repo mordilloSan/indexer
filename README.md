@@ -2,9 +2,28 @@
 
 # Indexer
 
-Streaming filesystem indexer daemon that snapshots directory trees into SQLite and exposes search/dirsize APIs over Unix sockets or TCP. Built for quick queries without re-walking the filesystem.
+This software was built as proof of concept for a filesystem indexer using a SQLite database, written in Go.
 
-## Highlights
+The goal was to have a permanently running daemon with minimal memory footprint, fast(ish) full indexing, and efficient query responses.
+
+## Contents
+
+- [Features](#features)
+- [Quickstart](#quickstart)
+- [Installation](#installation)
+  - [Install from local build (Go required)](#install-from-local-build-go-required)
+  - [Install from GitHub Releases (no Go required)](#install-from-github-releases-no-go-required)
+- [CLI flags](#cli-flags)
+- [API](#api)
+- [Architecture](#architecture)
+- [Database schema](#database-schema)
+- [Development](#development)
+- [Configuration file (`/etc/default/indexer`)](#configuration-file-etcdefaultindexer)
+- [Performance](#performance)
+- [Limitations](#limitations)
+- [License](#license)
+
+## Features
 
 - Daemonized HTTP API on a Unix socket by default; optional TCP listener for remote access.
 - Streaming writes to SQLite (500-entry batches) to keep memory low (~150 MB for ~1M files).
@@ -15,18 +34,76 @@ Streaming filesystem indexer daemon that snapshots directory trees into SQLite a
 ## Quickstart
 
 ```bash
-go build -o indexer .
-./indexer --path /data --socket-path /tmp/indexer.sock --db-path /tmp/indexer.db
+make run
+```
 
-# Health and basic queries
+That should produce the following logs:
+
+```bash
+API listening on unix:///tmp/indexer.sock
+API listening on http://localhost:9999
+```
+
+#### Health and basic queries
+```bash
 curl --unix-socket /tmp/indexer.sock http://localhost/status
 curl --unix-socket /tmp/indexer.sock -X POST http://localhost/index
 curl --unix-socket /tmp/indexer.sock 'http://localhost/search?q=log&limit=20'
 ```
 
-Add `--listen :8080` to expose the API over TCP instead of (or alongside) the Unix socket.
+If you installed via systemd, you can also query status with:
 
-### CLI flags
+```bash
+indexer --status
+```
+
+## Installation
+
+### Install from local build (Go required)
+
+An installation script is provided at `scripts/local_install.sh` that automates the setup (builds from source):
+
+```bash
+sudo ./scripts/local_install.sh
+```
+
+The script performs the following steps:
+1. Builds the binary and installs it to `/usr/local/bin/indexer`
+2. Installs systemd service and socket units from the `systemd/` directory
+3. Creates `/etc/default/indexer` configuration file with environment variables
+4. Enables socket activation and starts the daemon
+5. Verifies the installation
+
+### Install from GitHub Releases (no Go required)
+
+If you prefer not to build locally, use the release installer (downloads the prebuilt binary and systemd unit files from GitHub Releases):
+
+```bash
+curl -fsSL https://github.com/mordilloSan/indexer/releases/latest/download/indexer-install.sh | sudo bash
+```
+
+To install a specific version:
+
+```bash
+curl -fsSL https://github.com/mordilloSan/indexer/releases/download/v1.1.2/indexer-install.sh | sudo bash
+```
+
+After installation, edit `/etc/default/indexer` to configure the path to index, interval, and other options. Systemd socket activation is used by default, so the daemon starts on-demand when the socket is accessed.
+
+Notes:
+- The installers place the binary at `/usr/local/bin/indexer` (usually already on `$PATH`).
+- When installed via systemd, you typically manage the daemon via `systemctl`, but you can still run `indexer --version` / `indexer --help` from your shell.
+- Avoid running a second daemon manually against the same `--socket-path` / `--db-path` while the systemd service is running.
+
+Quick checks:
+
+```bash
+command -v indexer || echo "indexer not on PATH (try /usr/local/bin/indexer)"
+indexer --version
+sudo systemctl status indexer.service --no-pager
+```
+
+## CLI flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -38,6 +115,7 @@ Add `--listen :8080` to expose the API over TCP instead of (or alongside) the Un
 | `--listen` | *(disabled)* | TCP address for HTTP API (e.g., `:8080`) |
 | `--interval` | `0` (off) | Auto-index interval (`6h`, `30m`, etc.) |
 | `--verbose` | `false` | Enable debug logging |
+| `--status` | `false` | Query `/status` from a running daemon and exit |
 | `--version` | `false` | Print version/build info and exit |
 
 On startup (CLI or systemd), `indexer` logs its version/build info.
@@ -46,7 +124,7 @@ On startup (CLI or systemd), `indexer` logs its version/build info.
 
 HTTP is served on the Unix socket (default) or on the TCP listener if `--listen` is set. The same JSON schema is returned in both cases.
 
-### `POST /index`
+#### `POST /index`
 
 Trigger a full index in the background.
 
@@ -56,7 +134,7 @@ curl --unix-socket /tmp/indexer.sock -X POST http://localhost/index
 
 Response: `{"status":"running"}` with `202 Accepted`. Returns `409 Conflict` if an index is already running.
 
-### `POST /reindex?path=<subpath>`
+#### `POST /reindex?path=<subpath>`
 
 Re-scan a specific subdirectory within the indexed root. The `path` query parameter is required and must be an absolute path relative to the index (e.g., `/home/alice/docs`). During the run, existing entries under that subpath are deleted, the filesystem is re-walked, and ancestor directory sizes are updated.
 
@@ -66,7 +144,7 @@ curl --unix-socket /tmp/indexer.sock -X POST 'http://localhost/reindex?path=/pro
 
 Response: `{"status":"running","path":"/projects/work"}` with `202 Accepted`. Returns `400` when `path` is missing, or `409` if another index/reindex is already running.
 
-### `GET /status`
+#### `GET /status`
 
 Returns daemon state and stats from the most recent index.
 
@@ -83,7 +161,7 @@ Notes:
 - `last_indexed` may be empty if the index has never been run.
 - When the daemon is indexing and the DB is temporarily unavailable, the response may include a `warning` field.
 
-### `GET /search?q=<term>&limit=<n>`
+#### `GET /search?q=<term>&limit=<n>`
 
 Substring name search using SQLite `LIKE`. Returns both files and folders with a `type` field for clear identification.
 
@@ -100,7 +178,7 @@ The `type` field is either `"file"` or `"folder"` for easy filtering.
 
 If there is no index yet, the endpoint returns an empty list.
 
-### `GET /entries?path=<path>&recursive=<bool>&limit=<n>&offset=<n>`
+#### `GET /entries?path=<path>&recursive=<bool>&limit=<n>&offset=<n>`
 
 List entries at or under a path. `recursive=true` returns the full subtree; without it you get the entry that matches `path`. Each entry includes a `type` field (`"file"` or `"folder"`) for clear identification.
 
@@ -110,7 +188,7 @@ curl --unix-socket /tmp/indexer.sock 'http://localhost/entries?path=/home&recurs
 
 If there is no index yet, the endpoint returns an empty list.
 
-### `GET /subfolders?path=<path>`
+#### `GET /subfolders?path=<path>`
 
 Get direct child folders of a path with their pre-calculated sizes (non-recursive). This is useful for building directory browsers or disk usage visualizations.
 
@@ -130,7 +208,7 @@ The `path` parameter defaults to `/` (root) if omitted. Only directories are ret
 
 If there is no index yet, the endpoint returns an empty list.
 
-### `GET /dirsize?path=<path>`
+#### `GET /dirsize?path=<path>`
 
 Aggregate size for a path (inclusive).
 
@@ -145,7 +223,7 @@ Response:
 
 Returns `400` if the directory is not present in the latest index.
 
-### `POST /add`
+#### `POST /add`
 
 Manually upsert a single entry into the latest index (useful for incremental updates).
 
@@ -161,7 +239,7 @@ Returns `400` if no index exists yet.
 
 Both `/add` and `/delete` update ancestor directory sizes so folder totals stay correct between full indexing runs.
 
-### `DELETE /delete?path=<path>`
+#### `DELETE /delete?path=<path>`
 
 Delete a single entry from the latest index and propagate the size change up the directory tree.
 
@@ -173,7 +251,7 @@ Response: `{"status":"ok"}` (no-op if the path was not present).
 
 Returns `400` if no index exists yet.
 
-### `GET /openapi.json`
+#### `GET /openapi.json`
 
 OpenAPI 3.0 document for the API (version 2.0.0).
 
@@ -240,16 +318,18 @@ Indexes: `idx_entries_index_id` on `index_id`, and `idx_entries_path` unique on 
 ## Development
 
 - Build: `make build` (or `go build -o indexer .`)
-- Tests: `go test ./...`
-- Benchmarks: `./scripts/benchmark.sh` writes results to `benchmark.md` and captures memory stats.
+- Tests: `make test`
+- Lint: `make golint`
+- Benchmarks: `make benchmark`
 
 ### Benchmarking
 
 The helper script in `scripts/benchmark.sh` spins up `indexer` in `--index-mode`, captures wall-clock time, RSS samples, and database stats, then appends a Markdown table to `benchmark.md`. Run it directly:
 
 ```bash
-./scripts/benchmark.sh
+make benchmark
 ```
+
 
 You can tweak the workload by exporting environment variables:
 
@@ -264,40 +344,11 @@ You can tweak the workload by exporting environment variables:
 
 All other knobs (e.g., `DB_PATH`, `SOCKET_PATH`, `TOP_SNAPSHOT`) can also be overridden—check the script header for defaults. The script cleans up its temporary dataset and reports any failures with links to the captured logs.
 
-## Systemd
+## Configuration file (`/etc/default/indexer`)
 
-An installation script is provided at `scripts/global_install.sh` that automates the setup:
+When you install via `scripts/local_install.sh`, `scripts/global_install.sh`, or the GitHub Release installer, the systemd unit reads `/etc/default/indexer` (if present) and uses it to set the daemon flags.
 
-```bash
-sudo ./scripts/global_install.sh
-```
-
-The script performs the following steps:
-1. Builds the binary and installs it to `/usr/local/bin/indexer`
-2. Installs systemd service and socket units from the `systemd/` directory
-3. Creates `/etc/default/indexer` configuration file with environment variables
-4. Enables socket activation and starts the daemon
-5. Verifies the installation
-
-### Install from GitHub Releases (no Go required)
-
-If you prefer not to build locally, use the release installer (downloads the prebuilt binary and systemd unit files from GitHub Releases):
-
-```bash
-curl -fsSL https://github.com/mordilloSan/indexer/releases/latest/download/indexer-install.sh | sudo bash
-```
-
-To install a specific version:
-
-```bash
-curl -fsSL https://github.com/mordilloSan/indexer/releases/download/v1.1.2/indexer-install.sh | sudo bash
-```
-
-After installation, edit `/etc/default/indexer` to configure the path to index, interval, and other options. Systemd socket activation is used by default, so the daemon starts on-demand when the socket is accessed.
-
-### Configuration file (`/etc/default/indexer`)
-
-When you install via `scripts/global_install.sh` or the GitHub Release installer, the systemd unit reads `/etc/default/indexer` (if present) and uses it to set the daemon flags.
+If `/etc/default/indexer` is not present, the systemd unit still starts using its built-in defaults (it uses `EnvironmentFile=-/etc/default/indexer`, where the leading `-` means “optional”).
 
 Common settings:
 
@@ -317,8 +368,9 @@ INDEXER_DB_PATH=/tmp/indexer.db
 # Auto-index interval (e.g., 6h, 30m); set 0 to disable
 INDEXER_INTERVAL=6h
 
-# Optional extra flags (quote if it contains spaces)
-INDEXER_LISTEN_FLAG="--listen :8080"
+# Optional extra flags appended to the daemon command line
+# (Example: expose HTTP over TCP as well as the Unix socket)
+INDEXER_LISTEN_FLAG=--listen=:8080
 ```
 
 Apply changes:

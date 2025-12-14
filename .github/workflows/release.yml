@@ -74,9 +74,9 @@ jobs:
           mkdir -p dist
           cp systemd/indexer.service dist/indexer.service
           cp systemd/indexer.socket dist/indexer.socket
-          template="scripts/github_install.sh"
+          template="scripts/global_install.sh"
           if [ ! -f "$template" ]; then
-            template="installer/scripts/github_install.sh"
+            template="installer/scripts/global_install.sh"
           fi
           sed -e "s/^default_version=\"__VERSION__\"$/default_version=\"${{ steps.tag.outputs.tag }}\"/" \
             "$template" > dist/indexer-install.sh

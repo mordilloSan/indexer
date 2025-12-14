@@ -4,6 +4,9 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -20,6 +23,7 @@ func main() {
 	var (
 		indexMode     = flag.Bool("index-mode", false, "Internal: run index and exit (spawned by daemon)")
 		showVersion   = flag.Bool("version", false, "Print version and exit")
+		showStatus    = flag.Bool("status", false, "Query /status from a running daemon and exit")
 		indexPath     = flag.String("path", "", "Path to index (required)")
 		indexName     = flag.String("name", "", "Name for this index (defaults to sanitized path)")
 		includeHidden = flag.Bool("include-hidden", false, "Include hidden files and directories")
@@ -33,6 +37,14 @@ func main() {
 
 	if *showVersion {
 		fmt.Println(version.String())
+		return
+	}
+
+	if *showStatus {
+		if err := printStatus(*socketPath, *listenAddr); err != nil {
+			fmt.Fprintln(os.Stderr, err.Error())
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -155,4 +167,75 @@ func parseInterval(s string) (time.Duration, error) {
 		return 0, nil
 	}
 	return time.ParseDuration(s)
+}
+
+func printStatus(socketPath, listenAddr string) error {
+	client, url, err := statusClientAndURL(socketPath, listenAddr)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := ioReadAllLimit(resp.Body, 2<<20)
+	if err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	fmt.Println(strings.TrimSpace(string(body)))
+	return nil
+}
+
+func statusClientAndURL(socketPath, listenAddr string) (*http.Client, string, error) {
+	timeout := 5 * time.Second
+
+	if listenAddr != "" {
+		base := listenAddr
+		if strings.HasPrefix(base, "http://") || strings.HasPrefix(base, "https://") {
+			return &http.Client{Timeout: timeout}, strings.TrimRight(base, "/") + "/status", nil
+		}
+		if strings.HasPrefix(base, ":") {
+			base = "127.0.0.1" + base
+		}
+		return &http.Client{Timeout: timeout}, "http://" + strings.TrimRight(base, "/") + "/status", nil
+	}
+
+	if socketPath == "-" {
+		return nil, "", fmt.Errorf("status requires either --listen or a unix socket (got --socket-path '-')")
+	}
+	if socketPath == "" {
+		socketPath = "/var/run/indexer.sock"
+	}
+
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", socketPath)
+		},
+	}
+	return &http.Client{Transport: tr, Timeout: timeout}, "http://unix/status", nil
+}
+
+func ioReadAllLimit(r io.Reader, limit int64) ([]byte, error) {
+	lr := &io.LimitedReader{R: r, N: limit}
+	b, err := io.ReadAll(lr)
+	if err != nil {
+		return nil, err
+	}
+	if lr.N <= 0 {
+		return nil, fmt.Errorf("response too large (>%d bytes)", limit)
+	}
+	return b, nil
 }
