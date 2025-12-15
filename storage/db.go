@@ -263,6 +263,7 @@ func initSchema(ctx context.Context, db *sql.DB) error {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			index_id INTEGER NOT NULL,
 			relative_path TEXT NOT NULL,
+			path_depth INTEGER NOT NULL DEFAULT 0,
 			absolute_path TEXT NOT NULL,
 			name TEXT NOT NULL,
 			size INTEGER NOT NULL,
@@ -289,6 +290,9 @@ func initSchema(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 
+	if err := ensureColumn(ctx, db, "entries", "path_depth", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	if err := ensureColumn(ctx, db, "entries", "inode", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
@@ -302,6 +306,22 @@ func initSchema(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if err := ensureColumn(ctx, db, "indexes", "vacuum_duration_ms", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+
+	// Backfill path_depth for existing rows (0 for root "/", otherwise number of segments)
+	// Safe to run on every startup; it only updates rows still at the default value.
+	if _, err := db.ExecContext(ctx, `
+		UPDATE entries
+		SET path_depth = (LENGTH(relative_path) - LENGTH(REPLACE(relative_path, '/', '')))
+		WHERE relative_path != '/' AND path_depth = 0;
+	`); err != nil {
+		return err
+	}
+
+	if _, err := db.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_entries_subfolders ON entries(index_id, type, path_depth, relative_path);
+	`); err != nil {
 		return err
 	}
 
@@ -350,6 +370,7 @@ func insertEntriesBatch(ctx context.Context, tx *sql.Tx, indexID int64, scanTime
 INSERT INTO entries (
 	index_id,
 	relative_path,
+	path_depth,
 	absolute_path,
 	name,
 	size,
@@ -359,7 +380,7 @@ INSERT INTO entries (
 	inode,
 	last_seen
 ) VALUES `
-	const singlePlaceholder = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+	const singlePlaceholder = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 	const upsertSuffix = `
 ON CONFLICT(index_id, relative_path) DO UPDATE SET
 	absolute_path = excluded.absolute_path,
@@ -376,15 +397,20 @@ ON CONFLICT(index_id, relative_path) DO UPDATE SET
 	builder.Grow(len(insertPrefix) + len(singlePlaceholder)*len(batch) + len(batch) + len(upsertSuffix))
 	builder.WriteString(insertPrefix)
 
-	args := make([]any, 0, len(batch)*10)
+	args := make([]any, 0, len(batch)*11)
 	for i, entry := range batch {
 		if i > 0 {
 			builder.WriteByte(',')
 		}
 		builder.WriteString(singlePlaceholder)
+		pathDepth := 0
+		if entry.RelativePath != "/" {
+			pathDepth = strings.Count(entry.RelativePath, "/")
+		}
 		args = append(args,
 			indexID,
 			entry.RelativePath,
+			pathDepth,
 			entry.AbsolutePath,
 			entry.Name,
 			entry.Size,
@@ -448,11 +474,15 @@ func UpdateEntry(ctx context.Context, db dbExecutor, indexID int64, entry indexi
 	}
 
 	// Upsert the entry
+	pathDepth := 0
+	if entry.RelativePath != "/" {
+		pathDepth = strings.Count(entry.RelativePath, "/")
+	}
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO entries (
-			index_id, relative_path, absolute_path, name, size, mod_time,
+			index_id, relative_path, path_depth, absolute_path, name, size, mod_time,
 			type, hidden, inode
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(index_id, relative_path) DO UPDATE SET
 			absolute_path = excluded.absolute_path,
 			name = excluded.name,
@@ -464,6 +494,7 @@ func UpdateEntry(ctx context.Context, db dbExecutor, indexID int64, entry indexi
 	`,
 		indexID,
 		entry.RelativePath,
+		pathDepth,
 		entry.AbsolutePath,
 		entry.Name,
 		entry.Size,

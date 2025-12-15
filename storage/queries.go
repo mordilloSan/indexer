@@ -171,10 +171,14 @@ func (s *Store) DirSize(ctx context.Context, path string) (int64, error) {
 // Path should be the relative path (e.g., "/dir/file.txt"), absPath is the full filesystem path.
 func (s *Store) UpsertEntry(indexID int64, entry EntryResult, absPath, typ string, hidden bool) error {
 	ctx := context.Background()
+	pathDepth := 0
+	if entry.Path != "/" {
+		pathDepth = strings.Count(entry.Path, "/")
+	}
 	_, err := s.db.ExecContext(ctx, `
         INSERT INTO entries (
-            index_id, relative_path, absolute_path, name, size, mod_time, type, hidden, inode
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            index_id, relative_path, path_depth, absolute_path, name, size, mod_time, type, hidden, inode
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(index_id, relative_path) DO UPDATE SET
             absolute_path=excluded.absolute_path,
             name=excluded.name,
@@ -183,7 +187,7 @@ func (s *Store) UpsertEntry(indexID int64, entry EntryResult, absPath, typ strin
             type=excluded.type,
             hidden=excluded.hidden,
             inode=excluded.inode;
-    `, indexID, entry.Path, absPath, entry.Name, entry.Size, entry.ModTime.Unix(), typ, indexing.BoolToInt(hidden), entry.Inode)
+    `, indexID, entry.Path, pathDepth, absPath, entry.Name, entry.Size, entry.ModTime.Unix(), typ, indexing.BoolToInt(hidden), entry.Inode)
 	return err
 }
 
@@ -350,39 +354,39 @@ func (s *Store) GetDirectSubfolders(ctx context.Context, parentPath string) ([]S
 		parentPath = "/" + strings.Trim(parentPath, "/")
 	}
 
-	// Query for direct children that are directories
-	// We match paths that start with parentPath/ and don't contain additional slashes
-	var query string
-	var args []any
+	parentDepth := 0
+	if parentPath != "/" {
+		parentDepth = strings.Count(parentPath, "/")
+	}
+	childDepth := parentDepth + 1
+
+	// Query for direct children that are directories using path_depth (precomputed at write time).
+	var (
+		query string
+		args  []any
+	)
 
 	if parentPath == "/" {
-		// Root level: find all entries with exactly one slash (the leading one)
 		query = `
             SELECT relative_path, name, size, mod_time
             FROM entries
             WHERE index_id = ?
               AND type = 'directory'
-              AND relative_path != '/'
-              AND (LENGTH(relative_path) - LENGTH(REPLACE(relative_path, '/', ''))) = 1
+              AND path_depth = 1
             ORDER BY name
         `
 		args = []any{indexID}
 	} else {
-		// Non-root: find direct children
-		// Path should be like parentPath/something but not parentPath/something/else
 		query = `
             SELECT relative_path, name, size, mod_time
             FROM entries
             WHERE index_id = ?
               AND type = 'directory'
+              AND path_depth = ?
               AND relative_path LIKE ?
-              AND relative_path != ?
-              AND (LENGTH(relative_path) - LENGTH(REPLACE(relative_path, '/', ''))) = ?
             ORDER BY name
         `
-		pattern := parentPath + "/%"
-		expectedSlashes := strings.Count(parentPath, "/") + 1
-		args = []any{indexID, pattern, parentPath, expectedSlashes}
+		args = []any{indexID, childDepth, parentPath + "/%"}
 	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
