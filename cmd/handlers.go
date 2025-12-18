@@ -1,13 +1,16 @@
 package cmd
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"runtime/debug"
+	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -109,7 +112,6 @@ func (d *daemon) handleVacuum(w http.ResponseWriter, r *http.Request) {
 			logger.Warnf("vacuum: wal checkpoint (post) failed: %v", err)
 		}
 		_ = storage.ReleaseSQLiteMemory(ctx, d.db)
-		debug.FreeOSMemory()
 
 		if indexID != 0 {
 			if _, err := d.db.ExecContext(ctx, `UPDATE indexes SET vacuum_duration_ms = ? WHERE id = ?;`, vs.Duration.Milliseconds(), indexID); err != nil {
@@ -139,7 +141,18 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		WALSize      int64  `json:"wal_size"`
 		SHMSize      int64  `json:"shm_size"`
 		TotalOnDisk  int64  `json:"total_on_disk"`
-		Warning      string `json:"warning,omitempty"`
+		RSSBytes     int64  `json:"rss_bytes"`
+
+		GoAllocBytes        uint64 `json:"go_alloc_bytes"`
+		GoHeapInuseBytes    uint64 `json:"go_heap_inuse_bytes"`
+		GoHeapIdleBytes     uint64 `json:"go_heap_idle_bytes"`
+		GoHeapReleasedBytes uint64 `json:"go_heap_released_bytes"`
+		GoSysBytes          uint64 `json:"go_sys_bytes"`
+		GoNumGC             uint32 `json:"go_num_gc"`
+		CgroupCurrent       int64  `json:"cgroup_memory_current_bytes"`
+		CgroupAnon          int64  `json:"cgroup_memory_anon_bytes"`
+		CgroupFile          int64  `json:"cgroup_memory_file_bytes"`
+		Warning             string `json:"warning,omitempty"`
 	}
 
 	if running {
@@ -199,7 +212,138 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		resp.TotalOnDisk = stats.TotalOnDisk
 	}
 
+	// 3) Memory stats (best-effort; should never fail /status)
+	{
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		resp.GoAllocBytes = ms.Alloc
+		resp.GoHeapInuseBytes = ms.HeapInuse
+		resp.GoHeapIdleBytes = ms.HeapIdle
+		resp.GoHeapReleasedBytes = ms.HeapReleased
+		resp.GoSysBytes = ms.Sys
+		resp.GoNumGC = ms.NumGC
+	}
+
+	if rss, err := procSelfRSSBytes(); err != nil {
+		addWarning(fmt.Sprintf("rss unavailable: %v", err))
+	} else {
+		resp.RSSBytes = rss
+	}
+
+	if cg, err := cgroupV2Memory(); err != nil {
+		// Common on non-systemd or cgroup v1; keep quiet unless daemon is idle (helps debugging).
+		if !running {
+			addWarning(fmt.Sprintf("cgroup mem unavailable: %v", err))
+		}
+	} else {
+		resp.CgroupCurrent = cg.Current
+		resp.CgroupAnon = cg.Anon
+		resp.CgroupFile = cg.File
+	}
+
 	writeJSON(w, resp)
+}
+
+func procSelfRSSBytes() (int64, error) {
+	b, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return 0, err
+	}
+	sc := bufio.NewScanner(bytes.NewReader(b))
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "VmRSS:") {
+			continue
+		}
+		// Format: VmRSS:\t  12345 kB
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return 0, fmt.Errorf("unexpected VmRSS format: %q", line)
+		}
+		kb, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		return kb * 1024, nil
+	}
+	if err := sc.Err(); err != nil {
+		return 0, err
+	}
+	return 0, fmt.Errorf("VmRSS not found")
+}
+
+type cgroupMemInfo struct {
+	Current int64
+	Anon    int64
+	File    int64
+}
+
+func cgroupV2Memory() (cgroupMemInfo, error) {
+	// cgroup v2 path is in /proc/self/cgroup as: 0::/some/path
+	raw, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		return cgroupMemInfo{}, err
+	}
+
+	var rel string
+	sc := bufio.NewScanner(bytes.NewReader(raw))
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.HasPrefix(line, "0::") {
+			rel = strings.TrimPrefix(line, "0::")
+			break
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return cgroupMemInfo{}, err
+	}
+	if rel == "" {
+		return cgroupMemInfo{}, fmt.Errorf("cgroup v2 path not found")
+	}
+
+	base := "/sys/fs/cgroup" + rel
+	current, err := readInt64File(base + "/memory.current")
+	if err != nil {
+		return cgroupMemInfo{}, err
+	}
+
+	stat, err := os.ReadFile(base + "/memory.stat")
+	if err != nil {
+		return cgroupMemInfo{}, err
+	}
+
+	var anon, file int64
+	sc = bufio.NewScanner(bytes.NewReader(stat))
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) != 2 {
+			continue
+		}
+		v, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		switch fields[0] {
+		case "anon":
+			anon = v
+		case "file":
+			file = v
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return cgroupMemInfo{}, err
+	}
+
+	return cgroupMemInfo{Current: current, Anon: anon, File: file}, nil
+}
+
+func readInt64File(path string) (int64, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	s := strings.TrimSpace(string(b))
+	return strconv.ParseInt(s, 10, 64)
 }
 
 func (d *daemon) handleSearch(w http.ResponseWriter, r *http.Request) {
