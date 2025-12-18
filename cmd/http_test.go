@@ -314,6 +314,83 @@ func TestHandleIndexConcurrency(t *testing.T) {
 	}
 }
 
+// Test /vacuum endpoint triggers a VACUUM run
+func TestHandleVacuum(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	d := &daemon{
+		cfg: DaemonConfig{
+			IndexName: "test",
+			IndexPath: "/",
+			DBPath:    dbPath,
+		},
+		db:    db,
+		store: storage.NewStoreWithDB(db, dbPath),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/vacuum", nil)
+	rr := httptest.NewRecorder()
+	d.handleVacuum(rr, req)
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("handleVacuum status = %d, want 202; body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "running" {
+		t.Fatalf("status = %q, want \"running\"", resp.Status)
+	}
+
+	// Wait for vacuum to complete
+	time.Sleep(100 * time.Millisecond)
+
+	req2 := httptest.NewRequest(http.MethodGet, "/vacuum", nil)
+	rr2 := httptest.NewRecorder()
+	d.handleVacuum(rr2, req2)
+	if rr2.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("handleVacuum GET status = %d, want 405", rr2.Code)
+	}
+}
+
+func TestHandleVacuumConcurrency(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	d := &daemon{
+		cfg: DaemonConfig{
+			IndexName: "test",
+			IndexPath: "/",
+			DBPath:    dbPath,
+		},
+		db:    db,
+		store: storage.NewStoreWithDB(db, dbPath),
+	}
+
+	d.running.Store(true)
+
+	req := httptest.NewRequest(http.MethodPost, "/vacuum", nil)
+	rr := httptest.NewRecorder()
+	d.handleVacuum(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("handleVacuum concurrent status = %d, want 409; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 // Test /search endpoint
 func TestHandleSearch(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "index.db")

@@ -144,6 +144,16 @@ curl --unix-socket /tmp/indexer.sock -X POST 'http://localhost/reindex?path=/pro
 
 Response: `{"status":"running","path":"/projects/work"}` with `202 Accepted`. Returns `400` when `path` is missing, or `409` if another index/reindex is already running.
 
+#### `POST /vacuum`
+
+Reclaim disk space by running SQLite `VACUUM` in the background. This can take a while on large databases and requires an exclusive lock, so queries may block briefly while it runs.
+
+```bash
+curl --unix-socket /tmp/indexer.sock -X POST http://localhost/vacuum
+```
+
+Response: `{"status":"running"}` with `202 Accepted`. Returns `409 Conflict` if another index/reindex/vacuum is already running.
+
 #### `GET /status`
 
 Returns daemon state and stats from the most recent index.
@@ -154,12 +164,13 @@ curl --unix-socket /tmp/indexer.sock http://localhost/status
 
 Example:
 ```json
-{"status":"idle","num_dirs":0,"num_files":0,"total_size":0,"last_indexed":"2025-01-15T10:30:45Z","total_indexes":1,"total_entries":0,"database_size":0}
+{"status":"idle","num_dirs":0,"num_files":0,"total_size":0,"last_indexed":"2025-01-15T10:30:45Z","total_indexes":1,"total_entries":0,"database_size":0,"wal_size":0,"shm_size":0,"total_on_disk":0}
 ```
 
 Notes:
 - `last_indexed` may be empty if the index has never been run.
 - When the daemon is indexing and the DB is temporarily unavailable, the response may include a `warning` field.
+- `database_size` is the main SQLite file only; `total_on_disk` includes `-wal` and `-shm` sidecars.
 
 #### `GET /search?q=<term>&limit=<n>`
 
@@ -304,7 +315,6 @@ SQLite with WAL and foreign keys on. Key tables:
 | `id` | INTEGER (PK) | Auto-increment ID |
 | `index_id` | INTEGER (FK) | References `indexes.id` |
 | `relative_path` | TEXT | Path relative to index root |
-| `absolute_path` | TEXT | Full filesystem path |
 | `name` | TEXT | File/directory name |
 | `size` | INTEGER | Logical size in bytes |
 | `mod_time` | INTEGER | Unix timestamp of last modification |

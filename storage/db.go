@@ -264,7 +264,6 @@ func initSchema(ctx context.Context, db *sql.DB) error {
 			index_id INTEGER NOT NULL,
 			relative_path TEXT NOT NULL,
 			path_depth INTEGER NOT NULL DEFAULT 0,
-			absolute_path TEXT NOT NULL,
 			name TEXT NOT NULL,
 			size INTEGER NOT NULL,
 			mod_time INTEGER NOT NULL,
@@ -275,6 +274,33 @@ func initSchema(ctx context.Context, db *sql.DB) error {
 			FOREIGN KEY (index_id) REFERENCES indexes(id) ON DELETE CASCADE
 		);
 	`); err != nil {
+		return err
+	}
+
+	// Breaking schema change: absolute_path is no longer stored.
+	// If an existing database still has entries.absolute_path, require a rebuild.
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(entries);`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			colType    string
+			notNull    int
+			defaultVal sql.NullString
+			pk         int
+		)
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultVal, &pk); err != nil {
+			return err
+		}
+		if strings.EqualFold(name, "absolute_path") {
+			return fmt.Errorf("unsupported database schema: entries.absolute_path exists; delete the DB file and reindex to rebuild")
+		}
+	}
+	if err := rows.Err(); err != nil {
 		return err
 	}
 
@@ -371,7 +397,6 @@ INSERT INTO entries (
 	index_id,
 	relative_path,
 	path_depth,
-	absolute_path,
 	name,
 	size,
 	mod_time,
@@ -380,10 +405,9 @@ INSERT INTO entries (
 	inode,
 	last_seen
 ) VALUES `
-	const singlePlaceholder = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+	const singlePlaceholder = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 	const upsertSuffix = `
 ON CONFLICT(index_id, relative_path) DO UPDATE SET
-	absolute_path = excluded.absolute_path,
 	name = excluded.name,
 	size = excluded.size,
 	mod_time = excluded.mod_time,
@@ -397,7 +421,7 @@ ON CONFLICT(index_id, relative_path) DO UPDATE SET
 	builder.Grow(len(insertPrefix) + len(singlePlaceholder)*len(batch) + len(batch) + len(upsertSuffix))
 	builder.WriteString(insertPrefix)
 
-	args := make([]any, 0, len(batch)*11)
+	args := make([]any, 0, len(batch)*10)
 	for i, entry := range batch {
 		if i > 0 {
 			builder.WriteByte(',')
@@ -411,7 +435,6 @@ ON CONFLICT(index_id, relative_path) DO UPDATE SET
 			indexID,
 			entry.RelativePath,
 			pathDepth,
-			entry.AbsolutePath,
 			entry.Name,
 			entry.Size,
 			entry.ModTime.Unix(),
@@ -480,11 +503,10 @@ func UpdateEntry(ctx context.Context, db dbExecutor, indexID int64, entry indexi
 	}
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO entries (
-			index_id, relative_path, path_depth, absolute_path, name, size, mod_time,
+			index_id, relative_path, path_depth, name, size, mod_time,
 			type, hidden, inode
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(index_id, relative_path) DO UPDATE SET
-			absolute_path = excluded.absolute_path,
 			name = excluded.name,
 			size = excluded.size,
 			mod_time = excluded.mod_time,
@@ -495,7 +517,6 @@ func UpdateEntry(ctx context.Context, db dbExecutor, indexID int64, entry indexi
 		indexID,
 		entry.RelativePath,
 		pathDepth,
-		entry.AbsolutePath,
 		entry.Name,
 		entry.Size,
 		entry.ModTime.Unix(),

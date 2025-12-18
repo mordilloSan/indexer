@@ -177,17 +177,16 @@ func (s *Store) UpsertEntry(indexID int64, entry EntryResult, absPath, typ strin
 	}
 	_, err := s.db.ExecContext(ctx, `
         INSERT INTO entries (
-            index_id, relative_path, path_depth, absolute_path, name, size, mod_time, type, hidden, inode
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            index_id, relative_path, path_depth, name, size, mod_time, type, hidden, inode
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(index_id, relative_path) DO UPDATE SET
-            absolute_path=excluded.absolute_path,
             name=excluded.name,
             size=excluded.size,
             mod_time=excluded.mod_time,
             type=excluded.type,
             hidden=excluded.hidden,
             inode=excluded.inode;
-    `, indexID, entry.Path, pathDepth, absPath, entry.Name, entry.Size, entry.ModTime.Unix(), typ, indexing.BoolToInt(hidden), entry.Inode)
+    `, indexID, entry.Path, pathDepth, entry.Name, entry.Size, entry.ModTime.Unix(), typ, indexing.BoolToInt(hidden), entry.Inode)
 	return err
 }
 
@@ -272,7 +271,10 @@ type Stats struct {
 	TotalEntries int64     `json:"total_entries"`
 	TotalSize    int64     `json:"total_size"`
 	LastScanTime time.Time `json:"last_scan_time"`
-	DatabaseSize int64     `json:"database_size"`
+	DatabaseSize int64     `json:"database_size"` // main DB file only (backwards-compatible)
+	WALSize      int64     `json:"wal_size"`
+	SHMSize      int64     `json:"shm_size"`
+	TotalOnDisk  int64     `json:"total_on_disk"`
 }
 
 // GetStats returns database statistics
@@ -311,6 +313,13 @@ func (s *Store) GetStats(ctx context.Context) (*Stats, error) {
 		if fi, err := os.Stat(s.dbPath); err == nil {
 			stats.DatabaseSize = fi.Size()
 		}
+		if fi, err := os.Stat(s.dbPath + "-wal"); err == nil {
+			stats.WALSize = fi.Size()
+		}
+		if fi, err := os.Stat(s.dbPath + "-shm"); err == nil {
+			stats.SHMSize = fi.Size()
+		}
+		stats.TotalOnDisk = stats.DatabaseSize + stats.WALSize + stats.SHMSize
 	}
 
 	return &stats, nil

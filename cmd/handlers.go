@@ -70,6 +70,56 @@ func (d *daemon) handleReindex(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (d *daemon) handleVacuum(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "use POST", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if !d.tryLockIndex() {
+		http.Error(w, "indexer already running", http.StatusConflict)
+		return
+	}
+
+	go func() {
+		defer d.unlockIndex()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Hour)
+		defer cancel()
+
+		indexID, err := d.store.LatestIndexID(ctx)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			logger.Warnf("vacuum: latest index id unavailable: %v", err)
+			indexID = 0
+		}
+
+		if _, err := storage.WALCheckpointTruncate(ctx, d.db); err != nil {
+			logger.Warnf("vacuum: wal checkpoint (pre) failed: %v", err)
+		}
+
+		vs, err := storage.Vacuum(ctx, d.db)
+		if err != nil {
+			logger.Errorf("vacuum failed: %v", err)
+			return
+		}
+		logger.Infof("Vacuum complete in %v", vs.Duration)
+
+		if _, err := storage.WALCheckpointTruncate(ctx, d.db); err != nil {
+			logger.Warnf("vacuum: wal checkpoint (post) failed: %v", err)
+		}
+		_ = storage.ReleaseSQLiteMemory(ctx, d.db)
+
+		if indexID != 0 {
+			if _, err := d.db.ExecContext(ctx, `UPDATE indexes SET vacuum_duration_ms = ? WHERE id = ?;`, vs.Duration.Milliseconds(), indexID); err != nil {
+				logger.Warnf("vacuum: failed to persist duration: %v", err)
+			}
+		}
+	}()
+
+	w.WriteHeader(http.StatusAccepted)
+	writeJSON(w, map[string]string{"status": "running"})
+}
+
 func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	running := d.running.Load()
@@ -84,6 +134,9 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		TotalIndexes int    `json:"total_indexes"`
 		TotalEntries int64  `json:"total_entries"`
 		DatabaseSize int64  `json:"database_size"`
+		WALSize      int64  `json:"wal_size"`
+		SHMSize      int64  `json:"shm_size"`
+		TotalOnDisk  int64  `json:"total_on_disk"`
 		Warning      string `json:"warning,omitempty"`
 	}
 
@@ -139,6 +192,9 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		resp.TotalIndexes = stats.TotalIndexes
 		resp.TotalEntries = stats.TotalEntries
 		resp.DatabaseSize = stats.DatabaseSize
+		resp.WALSize = stats.WALSize
+		resp.SHMSize = stats.SHMSize
+		resp.TotalOnDisk = stats.TotalOnDisk
 	}
 
 	writeJSON(w, resp)
@@ -326,6 +382,7 @@ const openapiSpec = `{
   "paths": {
     "/index": { "post": { "summary": "Trigger full index", "responses": { "202": {"description": "Started"}, "409": {"description": "Already running"} } } },
     "/reindex": { "post": { "summary": "Reindex a specific path", "parameters": [{ "in": "query", "name": "path", "required": true, "schema": {"type": "string"}, "description": "Path to reindex (e.g., /home/user)" }], "responses": { "202": {"description": "Started"}, "400": {"description": "Path required"}, "409": {"description": "Already running"} } } },
+    "/vacuum": { "post": { "summary": "Reclaim disk space (VACUUM)", "responses": { "202": {"description": "Started"}, "409": {"description": "Already running"} } } },
     "/status": { "get": { "summary": "Get status", "responses": { "200": {"description": "Status"} } } },
     "/search": { "get": { "summary": "Search entries (returns type: folder/file)", "parameters": [{ "in": "query", "name": "q", "schema": {"type": "string"} }, { "in": "query", "name": "limit", "schema": {"type": "integer"} }], "responses": { "200": {"description": "Results with type field indicating folder or file"} } } },
     "/subfolders": { "get": { "summary": "Get direct subfolders with sizes", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"}, "description": "Parent path (defaults to /)" }], "responses": { "200": {"description": "Array of direct subfolders with their sizes"} } } },

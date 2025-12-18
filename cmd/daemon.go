@@ -274,6 +274,7 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 	mux.HandleFunc("/openapi.json", serveOpenapi)
 	mux.HandleFunc("/index", d.handleIndex)
 	mux.HandleFunc("/reindex", d.handleReindex)
+	mux.HandleFunc("/vacuum", d.handleVacuum)
 	mux.HandleFunc("/status", d.handleStatus)
 	mux.HandleFunc("/search", d.handleSearch)
 	mux.HandleFunc("/dirsize", d.handleDirSize)
@@ -428,6 +429,13 @@ func (d *daemon) reindexPath(ctx context.Context, relativePath string) error {
 		newSize,
 	)
 
+	if stats, err := storage.WALCheckpointTruncate(ctx, d.db); err != nil {
+		logger.Warnf("WAL checkpoint failed after reindex: %v", err)
+	} else {
+		logger.Infof("WAL checkpoint complete after reindex in %v (busy=%d log=%d checkpointed=%d)", stats.Duration, stats.Busy, stats.Log, stats.Checkpointed)
+	}
+	_ = storage.ReleaseSQLiteMemory(ctx, d.db)
+
 	return nil
 }
 
@@ -573,6 +581,13 @@ func runIndex(ctx context.Context, db *sql.DB, indexName, indexPath string, incl
 		index.NumFiles,
 		index.GetTotalSize(),
 	)
+
+	if stats, err := storage.WALCheckpointTruncate(ctx, db); err != nil {
+		logger.Warnf("WAL checkpoint failed after index: %v", err)
+	} else {
+		logger.Infof("WAL checkpoint complete after index in %v (busy=%d log=%d checkpointed=%d)", stats.Duration, stats.Busy, stats.Log, stats.Checkpointed)
+	}
+	_ = storage.ReleaseSQLiteMemory(ctx, db)
 
 	return nil
 }
