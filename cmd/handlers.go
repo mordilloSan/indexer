@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -108,6 +109,7 @@ func (d *daemon) handleVacuum(w http.ResponseWriter, r *http.Request) {
 			logger.Warnf("vacuum: wal checkpoint (post) failed: %v", err)
 		}
 		_ = storage.ReleaseSQLiteMemory(ctx, d.db)
+		debug.FreeOSMemory()
 
 		if indexID != 0 {
 			if _, err := d.db.ExecContext(ctx, `UPDATE indexes SET vacuum_duration_ms = ? WHERE id = ?;`, vs.Duration.Milliseconds(), indexID); err != nil {

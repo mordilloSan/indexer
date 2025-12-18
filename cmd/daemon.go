@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -435,6 +436,7 @@ func (d *daemon) reindexPath(ctx context.Context, relativePath string) error {
 		logger.Infof("WAL checkpoint complete after reindex in %v (busy=%d log=%d checkpointed=%d)", stats.Duration, stats.Busy, stats.Log, stats.Checkpointed)
 	}
 	_ = storage.ReleaseSQLiteMemory(ctx, d.db)
+	debug.FreeOSMemory()
 
 	return nil
 }
@@ -588,6 +590,7 @@ func runIndex(ctx context.Context, db *sql.DB, indexName, indexPath string, incl
 		logger.Infof("WAL checkpoint complete after index in %v (busy=%d log=%d checkpointed=%d)", stats.Duration, stats.Busy, stats.Log, stats.Checkpointed)
 	}
 	_ = storage.ReleaseSQLiteMemory(ctx, db)
+	debug.FreeOSMemory()
 
 	return nil
 }
