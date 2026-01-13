@@ -52,6 +52,12 @@ func (d *daemon) handleReindex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reject path traversal attempts
+	if !indexing.ValidateRelativePath(path) {
+		http.Error(w, "invalid path: path traversal not allowed", http.StatusBadRequest)
+		return
+	}
+
 	// Normalize the path
 	normalizedPath := indexing.NormalizeIndexPath(path)
 
@@ -360,7 +366,11 @@ func (d *daemon) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 func (d *daemon) handleEntries(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	path := queryPathOrRoot(r.URL.Query().Get("path"))
+	path, ok := queryPathOrRoot(r.URL.Query().Get("path"))
+	if !ok {
+		http.Error(w, "invalid path: path traversal not allowed", http.StatusBadRequest)
+		return
+	}
 	recursive := r.URL.Query().Get("recursive") == "true"
 	limit := queryInt(r.URL.Query().Get("limit"), 200, 1)
 	offset := queryInt(r.URL.Query().Get("offset"), 0, 0)
@@ -374,7 +384,11 @@ func (d *daemon) handleEntries(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *daemon) handleDirSize(w http.ResponseWriter, r *http.Request) {
-	path := queryPathOrRoot(r.URL.Query().Get("path"))
+	path, ok := queryPathOrRoot(r.URL.Query().Get("path"))
+	if !ok {
+		http.Error(w, "invalid path: path traversal not allowed", http.StatusBadRequest)
+		return
+	}
 	total, err := d.store.DirSize(r.Context(), path)
 	if err != nil {
 		if errors.Is(err, storage.ErrDirectoryNotFound) {
@@ -392,7 +406,11 @@ func (d *daemon) handleDirSize(w http.ResponseWriter, r *http.Request) {
 
 func (d *daemon) handleSubfolders(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	path := queryPathOrRoot(r.URL.Query().Get("path"))
+	path, ok := queryPathOrRoot(r.URL.Query().Get("path"))
+	if !ok {
+		http.Error(w, "invalid path: path traversal not allowed", http.StatusBadRequest)
+		return
+	}
 
 	results, err := d.store.GetDirectSubfolders(ctx, path)
 	if err != nil {
@@ -476,6 +494,12 @@ func (d *daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reject path traversal attempts
+	if !indexing.ValidateRelativePath(path) {
+		http.Error(w, "invalid path: path traversal not allowed", http.StatusBadRequest)
+		return
+	}
+
 	ctx := r.Context()
 	indexID, err := d.store.LatestIndexID(ctx)
 	if err != nil {
@@ -509,11 +533,15 @@ func queryInt(q string, def int, min int) int {
 }
 
 // queryPathOrRoot returns the path query parameter or "/" if empty.
-func queryPathOrRoot(path string) string {
+func queryPathOrRoot(path string) (string, bool) {
 	if path == "" {
-		return "/"
+		return "/", true
 	}
-	return path
+	// Validate path to prevent traversal attempts
+	if !indexing.ValidateRelativePath(path) {
+		return "", false
+	}
+	return indexing.NormalizeIndexPath(path), true
 }
 
 // Minimal OpenAPI spec served at /openapi.json.
@@ -524,11 +552,13 @@ func serveOpenapi(w http.ResponseWriter, r *http.Request) {
 
 const openapiSpec = `{
   "openapi": "3.0.0",
-  "info": { "title": "Indexer API", "version": "2.0.0" },
+  "info": { "title": "Indexer API", "version": "2.1.0" },
   "paths": {
     "/index": { "post": { "summary": "Trigger full index", "responses": { "202": {"description": "Started"}, "409": {"description": "Already running"} } } },
     "/reindex": { "post": { "summary": "Reindex a specific path", "parameters": [{ "in": "query", "name": "path", "required": true, "schema": {"type": "string"}, "description": "Path to reindex (e.g., /home/user)" }], "responses": { "202": {"description": "Started"}, "400": {"description": "Path required"}, "409": {"description": "Already running"} } } },
+    "/reindex/stream": { "post": { "summary": "Reindex with SSE progress stream", "description": "Server-Sent Events stream with progress updates. Events: started, progress, complete, error", "parameters": [{ "in": "query", "name": "path", "required": true, "schema": {"type": "string"}, "description": "Path to reindex" }], "responses": { "200": {"description": "SSE stream", "content": {"text/event-stream": {}}}, "400": {"description": "Path required"}, "409": {"description": "Already running"} } } },
     "/vacuum": { "post": { "summary": "Reclaim disk space (VACUUM)", "responses": { "202": {"description": "Started"}, "409": {"description": "Already running"} } } },
+    "/vacuum/stream": { "post": { "summary": "Vacuum with SSE progress stream", "description": "Server-Sent Events stream with progress updates. Events: started, progress, complete, error", "responses": { "200": {"description": "SSE stream", "content": {"text/event-stream": {}}}, "409": {"description": "Already running"} } } },
     "/status": { "get": { "summary": "Get status", "responses": { "200": {"description": "Status"} } } },
     "/search": { "get": { "summary": "Search entries (returns type: folder/file)", "parameters": [{ "in": "query", "name": "q", "schema": {"type": "string"} }, { "in": "query", "name": "limit", "schema": {"type": "integer"} }], "responses": { "200": {"description": "Results with type field indicating folder or file"} } } },
     "/subfolders": { "get": { "summary": "Get direct subfolders with sizes", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"}, "description": "Parent path (defaults to /)" }], "responses": { "200": {"description": "Array of direct subfolders with their sizes"} } } },

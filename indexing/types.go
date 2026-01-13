@@ -22,11 +22,27 @@ type IndexEntry struct {
 
 // NormalizeIndexPath returns the canonical relative path representation used throughout the index:
 // always leading "/", no trailing "/" (except for root which stays "/").
+// It also cleans the path to prevent path traversal attacks (e.g., "/../../../etc").
 func NormalizeIndexPath(p string) string {
 	if p == "" || p == "/" {
 		return "/"
 	}
-	return "/" + strings.Trim(p, "/")
+	// Clean the path to resolve ".." and "." sequences, preventing path traversal
+	cleaned := filepath.Clean("/" + strings.Trim(p, "/"))
+	if cleaned == "" || cleaned == "." {
+		return "/"
+	}
+	return cleaned
+}
+
+// ValidateRelativePath checks if a path is safe (doesn't escape the root via traversal).
+// Returns true if the path is valid, false if it attempts path traversal.
+func ValidateRelativePath(p string) bool {
+	cleaned := filepath.Clean("/" + p)
+	// After cleaning, the path should still start with "/" and not be empty
+	// filepath.Clean resolves ".." so "/../../etc" becomes "/etc" which is valid
+	// but we need to ensure the original didn't try to escape
+	return strings.HasPrefix(cleaned, "/") && !strings.Contains(p, "..")
 }
 
 // BoolToInt returns 1 for true, 0 for false.
