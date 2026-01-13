@@ -98,6 +98,12 @@ func (d *daemon) handleReindexStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reject path traversal attempts
+	if !indexing.ValidateRelativePath(path) {
+		http.Error(w, "invalid path: path traversal not allowed", http.StatusBadRequest)
+		return
+	}
+
 	normalizedPath := indexing.NormalizeIndexPath(path)
 
 	if !d.tryLockIndex() {
