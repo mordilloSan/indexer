@@ -29,21 +29,34 @@ type dbExecutor interface {
 	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
 }
 
+// ProgressCallback is called after each batch write with cumulative counts and last path processed
+type ProgressCallback func(filesWritten, dirsWritten int64, lastPath string)
+
 // StreamingWriter accepts entries via a channel and writes them to the database in batches.
 type StreamingWriter struct {
-	db       *sql.DB
-	indexID  int64
-	scanTime int64
-	entryCh  chan indexing.IndexEntry
-	doneCh   chan error
-	ctx      context.Context
-	cancel   context.CancelFunc
-	errVal   atomic.Value
+	db           *sql.DB
+	indexID      int64
+	scanTime     int64
+	entryCh      chan indexing.IndexEntry
+	doneCh       chan error
+	ctx          context.Context
+	cancel       context.CancelFunc
+	errVal       atomic.Value
+	progressCb   ProgressCallback
+	filesWritten int64
+	dirsWritten  int64
+	lastPath     string
 }
 
 // NewStreamingWriter creates a writer that batches entries and commits periodically.
 // The provided ctx allows callers to cancel the writer even if Close is not reached.
 func NewStreamingWriter(ctx context.Context, db *sql.DB, indexID int64, bufferSize int) *StreamingWriter {
+	return NewStreamingWriterWithProgress(ctx, db, indexID, bufferSize, nil)
+}
+
+// NewStreamingWriterWithProgress creates a writer with an optional progress callback.
+// The callback is invoked after each entry is processed with cumulative file/dir counts.
+func NewStreamingWriterWithProgress(ctx context.Context, db *sql.DB, indexID int64, bufferSize int, progressCb ProgressCallback) *StreamingWriter {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -52,13 +65,14 @@ func NewStreamingWriter(ctx context.Context, db *sql.DB, indexID int64, bufferSi
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	sw := &StreamingWriter{
-		db:       db,
-		indexID:  indexID,
-		scanTime: time.Now().UTC().Unix(),
-		entryCh:  make(chan indexing.IndexEntry, bufferSize),
-		doneCh:   make(chan error, 1),
-		ctx:      ctx,
-		cancel:   cancel,
+		db:         db,
+		indexID:    indexID,
+		scanTime:   time.Now().UTC().Unix(),
+		entryCh:    make(chan indexing.IndexEntry, bufferSize),
+		doneCh:     make(chan error, 1),
+		ctx:        ctx,
+		cancel:     cancel,
+		progressCb: progressCb,
 	}
 	go sw.run()
 	return sw
@@ -136,6 +150,19 @@ func (sw *StreamingWriter) run() {
 				err = flush()
 				return
 			}
+			// Track progress
+			if entry.Type == "directory" {
+				sw.dirsWritten++
+			} else {
+				sw.filesWritten++
+			}
+			sw.lastPath = entry.RelativePath
+
+			// Call progress callback if set
+			if sw.progressCb != nil {
+				sw.progressCb(sw.filesWritten, sw.dirsWritten, sw.lastPath)
+			}
+
 			batch = append(batch, entry)
 			if len(batch) >= batchSize {
 				if err = flush(); err != nil {

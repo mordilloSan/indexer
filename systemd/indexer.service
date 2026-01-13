@@ -5,7 +5,7 @@ Requires=indexer.socket
 
 [Service]
 Type=simple
-Environment="INDEXER_PATH=/" "INDEXER_NAME=root" "INDEXER_INCLUDE_HIDDEN=false" "INDEXER_SOCKET=/var/run/indexer.sock" "INDEXER_DB_PATH=/tmp/indexer.db" "INDEXER_INTERVAL=1h" "INDEXER_LISTEN_FLAG="
+Environment="INDEXER_PATH=/" "INDEXER_NAME=root" "INDEXER_INCLUDE_HIDDEN=true" "INDEXER_SOCKET=/var/run/indexer.sock" "INDEXER_DB_PATH=/tmp/indexer.db" "INDEXER_INTERVAL=1h" "INDEXER_LISTEN_FLAG="
 EnvironmentFile=-/etc/default/indexer
 ExecStartPre=/bin/sh -c 'if [ ! -f /etc/default/indexer ]; then echo "indexer: /etc/default/indexer missing; using unit defaults"; fi'
 ExecStart=/usr/local/bin/indexer --path ${INDEXER_PATH} --name ${INDEXER_NAME} --include-hidden=${INDEXER_INCLUDE_HIDDEN} --db-path ${INDEXER_DB_PATH} --socket-path ${INDEXER_SOCKET} --interval ${INDEXER_INTERVAL} ${INDEXER_LISTEN_FLAG}
