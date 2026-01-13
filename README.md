@@ -27,6 +27,7 @@ The goal was to have a permanently running daemon with minimal memory footprint,
 
 - Daemonized HTTP API on a Unix socket by default; optional TCP listener for remote access.
 - Streaming writes to SQLite (500-entry batches) to keep memory low (~150 MB for ~1M files).
+- Server-Sent Events (SSE) streaming for real-time progress updates during reindex and vacuum operations.
 - Hardlink-aware size accounting so totals match `du`; deleted entries are cleaned after each run.
 - Auto-index on a fixed interval plus manual `/index` endpoint; hidden file support is opt-in.
 - WAL-enabled SQLite schema with a small store layer for search, dirsize, and path queries.
@@ -144,6 +145,24 @@ curl --unix-socket /tmp/indexer.sock -X POST 'http://localhost/reindex?path=/pro
 
 Response: `{"status":"running","path":"/projects/work"}` with `202 Accepted`. Returns `400` when `path` is missing, or `409` if another index/reindex is already running.
 
+#### `POST /reindex/stream?path=<subpath>`
+
+Same as `/reindex`, but returns a Server-Sent Events (SSE) stream with real-time progress updates instead of returning immediately.
+
+```bash
+curl --unix-socket /tmp/indexer.sock -N -X POST 'http://localhost/reindex/stream?path=/projects/work'
+```
+
+The `-N` flag disables buffering so events stream in real-time.
+
+**Event types:**
+- `started` - Operation began: `{"status":"running","path":"/projects/work"}`
+- `progress` - Periodic updates (every 100 entries): `{"files_indexed":1500,"dirs_indexed":42,"current_path":"/projects/work/src"}`
+- `complete` - Final stats: `{"path":"/projects/work","files_indexed":4500,"dirs_indexed":120,"total_size":1073741824,"duration_ms":2340}`
+- `error` - If something goes wrong: `{"message":"error description"}`
+
+Returns `400` when `path` is missing, or `409` if another index/reindex is already running.
+
 #### `POST /vacuum`
 
 Reclaim disk space by running SQLite `VACUUM` in the background. This can take a while on large databases and requires an exclusive lock, so queries may block briefly while it runs.
@@ -153,6 +172,23 @@ curl --unix-socket /tmp/indexer.sock -X POST http://localhost/vacuum
 ```
 
 Response: `{"status":"running"}` with `202 Accepted`. Returns `409 Conflict` if another index/reindex/vacuum is already running.
+
+#### `POST /vacuum/stream`
+
+Same as `/vacuum`, but returns a Server-Sent Events (SSE) stream with real-time progress updates.
+
+```bash
+curl --unix-socket /tmp/indexer.sock -N -X POST http://localhost/vacuum/stream
+```
+
+**Event types:**
+- `started` - Operation began: `{"status":"running"}`
+- `progress` - Phase updates: `{"phase":"vacuum","message":"Running VACUUM (this may take a while)..."}`
+  - Phases: `pre_checkpoint`, `vacuum`, `post_checkpoint`
+- `complete` - Final stats: `{"duration_ms":5420}`
+- `error` - If something goes wrong: `{"message":"error description"}`
+
+Returns `409 Conflict` if another index/reindex/vacuum is already running.
 
 #### `GET /status`
 
@@ -264,7 +300,7 @@ Returns `400` if no index exists yet.
 
 #### `GET /openapi.json`
 
-OpenAPI 3.0 document for the API (version 2.0.0).
+OpenAPI 3.0 document for the API (version 2.1.0).
 
 ## Architecture
 
@@ -273,7 +309,8 @@ indexer/
 ├── main.go              # Entry point, flag parsing, daemon setup
 ├── cmd/
 │   ├── daemon.go        # HTTP server (Unix socket + TCP) setup
-│   └── handlers.go      # API request handlers
+│   ├── handlers.go      # API request handlers
+│   └── handlers_sse.go  # Server-Sent Events streaming handlers
 ├── storage/
 │   ├── db.go            # SQLite schema and core database operations
 │   └── queries.go       # Query API (search, dirsize, entries, subfolders)
