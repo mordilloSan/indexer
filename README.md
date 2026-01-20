@@ -30,7 +30,8 @@ The goal was to have a permanently running daemon with minimal memory footprint,
 - Server-Sent Events (SSE) streaming for real-time progress updates during reindex and vacuum operations.
 - Hardlink-aware size accounting so totals match `du`; deleted entries are cleaned after each run.
 - Auto-index on a fixed interval plus manual `/index` endpoint; hidden file support is opt-in.
-- WAL-enabled SQLite schema with a small store layer for search, dirsize, and path queries.
+- WAL-enabled SQLite schema with incremental auto-vacuum and index pruning for automatic space reclamation.
+- Small store layer for search, dirsize, and path queries.
 
 ## Quickstart
 
@@ -190,6 +191,28 @@ curl --unix-socket /tmp/indexer.sock -N -X POST http://localhost/vacuum/stream
 
 Returns `409 Conflict` if another index/reindex/vacuum is already running.
 
+#### `POST /prune?keep_latest=<n>&max_age_days=<days>`
+
+Prune old index records and their entries to reclaim database space. This removes index records that haven't been updated recently, keeping only the most recent ones. The associated entries are automatically deleted due to foreign key constraints.
+
+```bash
+# Use defaults (keep 1 latest index, delete indexes older than 30 days)
+curl --unix-socket /tmp/indexer.sock -X POST http://localhost/prune
+
+# Keep 3 most recent indexes, delete anything older than 7 days
+curl --unix-socket /tmp/indexer.sock -X POST 'http://localhost/prune?keep_latest=3&max_age_days=7'
+```
+
+**Query parameters:**
+- `keep_latest` (default: `1`) - Number of most recent indexes to keep (minimum 1)
+- `max_age_days` (default: `30`) - Maximum age in days for indexes to keep
+
+Response: `{"status":"running","keep_latest":"1","max_age_days":"30"}` with `202 Accepted`.
+
+Returns `409 Conflict` if another index/reindex/vacuum/prune is already running.
+
+**Note:** Pruning is useful when you've re-indexed multiple times and want to clean up old data. After pruning, consider running `/vacuum` to fully compact the database file. The database uses incremental auto-vacuum, so space is reclaimed automatically, but a full `VACUUM` defragments the file.
+
 #### `GET /status`
 
 Returns daemon state and stats from the most recent index.
@@ -300,7 +323,7 @@ Returns `400` if no index exists yet.
 
 #### `GET /openapi.json`
 
-OpenAPI 3.0 document for the API (version 2.1.0).
+OpenAPI 3.0 document for the API (version 2.2.0).
 
 ## Architecture
 
@@ -441,6 +464,38 @@ Service files are available in the `systemd/` directory for reference.
 - Single writer; multiple readers supported via WAL.
 - Filesystem changes between scans are not watched automatically; run an index or use `/add`/`/delete` to keep the index aligned with file operations.
 - Symlinks are resolved to targets; `/proc`, `/dev`, and network mounts are skipped on Linux.
+
+## Database Maintenance
+
+The database uses SQLite's incremental auto-vacuum feature to automatically reclaim space when records are deleted. However, you may want to manually manage database growth:
+
+### Pruning Old Indexes
+
+If you re-index frequently, old index records can accumulate. Use the `/prune` endpoint to clean them up:
+
+```bash
+# Keep only the latest index, remove anything older than 30 days
+curl --unix-socket /tmp/indexer.sock -X POST http://localhost/prune
+
+# Keep 5 most recent indexes, remove anything older than 7 days
+curl --unix-socket /tmp/indexer.sock -X POST 'http://localhost/prune?keep_latest=5&max_age_days=7'
+```
+
+### Full Database Compaction
+
+After pruning or when the database has accumulated fragmentation, run a full `VACUUM`:
+
+```bash
+curl --unix-socket /tmp/indexer.sock -X POST http://localhost/vacuum
+```
+
+### Monitoring Database Size
+
+Check the current database size via the `/status` endpoint:
+
+```bash
+curl --unix-socket /tmp/indexer.sock http://localhost/status | jq '{database_size, wal_size, shm_size, total_on_disk}'
+```
 
 ## License
 

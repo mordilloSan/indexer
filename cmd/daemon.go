@@ -277,6 +277,7 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 	mux.HandleFunc("/reindex/stream", d.handleReindexStream)
 	mux.HandleFunc("/vacuum", d.handleVacuum)
 	mux.HandleFunc("/vacuum/stream", d.handleVacuumStream)
+	mux.HandleFunc("/prune", d.handlePrune)
 	mux.HandleFunc("/status", d.handleStatus)
 	mux.HandleFunc("/search", d.handleSearch)
 	mux.HandleFunc("/dirsize", d.handleDirSize)

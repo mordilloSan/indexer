@@ -343,6 +343,11 @@ type SubfolderResult struct {
 	ModTime time.Time `json:"mod_time"`
 }
 
+// PruneOldIndexes removes old index records using the provided retention settings.
+func (s *Store) PruneOldIndexes(ctx context.Context, keepLatest int, maxAge time.Duration) (PruneStats, error) {
+	return PruneOldIndexes(ctx, s.db, keepLatest, maxAge)
+}
+
 // GetDirectSubfolders returns all direct child folders of a given path with their sizes.
 // This only returns immediate children (not recursive).
 func (s *Store) GetDirectSubfolders(ctx context.Context, parentPath string) ([]SubfolderResult, error) {
