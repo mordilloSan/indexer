@@ -793,8 +793,8 @@ func TestServeOpenapi(t *testing.T) {
 		t.Fatalf("info field missing or invalid")
 	}
 
-	if info["version"] != "2.1.0" {
-		t.Fatalf("API version = %v, want \"2.1.0\"", info["version"])
+	if info["version"] != "2.2.0" {
+		t.Fatalf("API version = %v, want \"2.2.0\"", info["version"])
 	}
 }
 

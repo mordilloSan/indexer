@@ -130,6 +130,67 @@ func (d *daemon) handleVacuum(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "running"})
 }
 
+func (d *daemon) handlePrune(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "use POST", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse query parameters
+	keepLatestStr := r.URL.Query().Get("keep_latest")
+	maxAgeDaysStr := r.URL.Query().Get("max_age_days")
+
+	// Defaults: keep 1 latest index, delete indexes older than 30 days
+	keepLatest := 1
+	maxAgeDays := 30
+
+	if keepLatestStr != "" {
+		if val, err := strconv.Atoi(keepLatestStr); err == nil && val >= 1 {
+			keepLatest = val
+		}
+	}
+	if maxAgeDaysStr != "" {
+		if val, err := strconv.Atoi(maxAgeDaysStr); err == nil && val > 0 {
+			maxAgeDays = val
+		}
+	}
+
+	if !d.tryLockIndex() {
+		http.Error(w, "indexer already running", http.StatusConflict)
+		return
+	}
+
+	go func() {
+		defer d.unlockIndex()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Hour)
+		defer cancel()
+
+		maxAge := time.Duration(maxAgeDays) * 24 * time.Hour
+		stats, err := d.store.PruneOldIndexes(ctx, keepLatest, maxAge)
+		if err != nil {
+			logger.Errorf("prune failed: %v", err)
+			return
+		}
+
+		logger.Infof("Prune complete in %v (deleted %d indexes, %d entries)",
+			stats.Duration, stats.DeletedIndexes, stats.DeletedEntries)
+
+		// Run WAL checkpoint and release memory after pruning
+		if _, err := storage.WALCheckpointTruncate(ctx, d.db); err != nil {
+			logger.Warnf("prune: wal checkpoint failed: %v", err)
+		}
+		_ = storage.ReleaseSQLiteMemory(ctx, d.db)
+	}()
+
+	w.WriteHeader(http.StatusAccepted)
+	writeJSON(w, map[string]string{
+		"status":       "running",
+		"keep_latest":  fmt.Sprintf("%d", keepLatest),
+		"max_age_days": fmt.Sprintf("%d", maxAgeDays),
+	})
+}
+
 func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	running := d.running.Load()
@@ -552,13 +613,14 @@ func serveOpenapi(w http.ResponseWriter, r *http.Request) {
 
 const openapiSpec = `{
   "openapi": "3.0.0",
-  "info": { "title": "Indexer API", "version": "2.1.0" },
+  "info": { "title": "Indexer API", "version": "2.2.0" },
   "paths": {
     "/index": { "post": { "summary": "Trigger full index", "responses": { "202": {"description": "Started"}, "409": {"description": "Already running"} } } },
     "/reindex": { "post": { "summary": "Reindex a specific path", "parameters": [{ "in": "query", "name": "path", "required": true, "schema": {"type": "string"}, "description": "Path to reindex (e.g., /home/user)" }], "responses": { "202": {"description": "Started"}, "400": {"description": "Path required"}, "409": {"description": "Already running"} } } },
     "/reindex/stream": { "post": { "summary": "Reindex with SSE progress stream", "description": "Server-Sent Events stream with progress updates. Events: started, progress, complete, error", "parameters": [{ "in": "query", "name": "path", "required": true, "schema": {"type": "string"}, "description": "Path to reindex" }], "responses": { "200": {"description": "SSE stream", "content": {"text/event-stream": {}}}, "400": {"description": "Path required"}, "409": {"description": "Already running"} } } },
     "/vacuum": { "post": { "summary": "Reclaim disk space (VACUUM)", "responses": { "202": {"description": "Started"}, "409": {"description": "Already running"} } } },
     "/vacuum/stream": { "post": { "summary": "Vacuum with SSE progress stream", "description": "Server-Sent Events stream with progress updates. Events: started, progress, complete, error", "responses": { "200": {"description": "SSE stream", "content": {"text/event-stream": {}}}, "409": {"description": "Already running"} } } },
+    "/prune": { "post": { "summary": "Prune old index records", "description": "Remove old index records and their entries to reclaim space", "parameters": [{ "in": "query", "name": "keep_latest", "schema": {"type": "integer", "default": 1}, "description": "Number of most recent indexes to keep (minimum 1)" }, { "in": "query", "name": "max_age_days", "schema": {"type": "integer", "default": 30}, "description": "Maximum age in days for indexes to keep" }], "responses": { "202": {"description": "Started"}, "409": {"description": "Already running"} } } },
     "/status": { "get": { "summary": "Get status", "responses": { "200": {"description": "Status"} } } },
     "/search": { "get": { "summary": "Search entries (returns type: folder/file)", "parameters": [{ "in": "query", "name": "q", "schema": {"type": "string"} }, { "in": "query", "name": "limit", "schema": {"type": "integer"} }], "responses": { "200": {"description": "Results with type field indicating folder or file"} } } },
     "/subfolders": { "get": { "summary": "Get direct subfolders with sizes", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"}, "description": "Parent path (defaults to /)" }], "responses": { "200": {"description": "Array of direct subfolders with their sizes"} } } },

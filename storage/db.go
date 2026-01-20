@@ -212,7 +212,8 @@ func Open(path string) (*sql.DB, error) {
 	}
 	// Use WAL for concurrent readers while streaming writes happen.
 	// synchronous=OFF for maximum write performance during indexing
-	dsn := fmt.Sprintf("%s?_busy_timeout=%d&_foreign_keys=on&_journal_mode=WAL&_synchronous=OFF", path, busyTimeoutMS)
+	// auto_vacuum=INCREMENTAL to automatically reclaim space when deleting records
+	dsn := fmt.Sprintf("%s?_busy_timeout=%d&_foreign_keys=on&_journal_mode=WAL&_synchronous=OFF&_auto_vacuum=INCREMENTAL", path, busyTimeoutMS)
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, err
