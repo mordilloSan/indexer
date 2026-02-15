@@ -87,7 +87,7 @@ curl -fsSL https://github.com/mordilloSan/indexer/releases/latest/download/index
 To install a specific version:
 
 ```bash
-curl -fsSL https://github.com/mordilloSan/indexer/releases/download/v1.1.2/indexer-install.sh | sudo bash
+curl -fsSL https://github.com/mordilloSan/indexer/releases/download/v1.2.0/indexer-install.sh | sudo bash
 ```
 
 After installation, edit `/etc/default/indexer` to configure the path to index, interval, and other options. Systemd socket activation is used by default, so the daemon starts on-demand when the socket is accessed.

@@ -9,7 +9,7 @@ import (
 // These variables are intended to be set at build time via -ldflags.
 // Example:
 //
-//	go build -ldflags "-X github.com/mordilloSan/indexer/internal/version.Version=v1.1.2 -X github.com/mordilloSan/indexer/internal/version.Commit=abc123 -X github.com/mordilloSan/indexer/internal/version.Date=2025-01-01T00:00:00Z"
+//	go build -ldflags "-X github.com/mordilloSan/indexer/internal/version.Version=v1.2.0 -X github.com/mordilloSan/indexer/internal/version.Commit=abc123 -X github.com/mordilloSan/indexer/internal/version.Date=2025-01-01T00:00:00Z"
 var (
 	Version = "dev"
 	Commit  = ""
