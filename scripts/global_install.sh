@@ -21,7 +21,7 @@ Environment variables:
   INDEXER_BINARY_NAME    Installed binary name (default: indexer)
 
 Examples:
-  sudo ./global_install.sh v1.1.2
+  sudo ./global_install.sh v1.2.0
   curl -fsSL https://github.com/mordilloSan/indexer/releases/latest/download/indexer-install.sh | sudo bash
 EOF
 }

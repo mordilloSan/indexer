@@ -25,8 +25,8 @@ const (
 
 // dbExecutor is an interface that both sql.DB and sql.Tx implement
 type dbExecutor interface {
-	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
-	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 // ProgressCallback is called after each batch write with cumulative counts and last path processed
