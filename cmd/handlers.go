@@ -356,8 +356,8 @@ func cgroupV2Memory() (cgroupMemInfo, error) {
 	sc := bufio.NewScanner(bytes.NewReader(raw))
 	for sc.Scan() {
 		line := sc.Text()
-		if strings.HasPrefix(line, "0::") {
-			rel = strings.TrimPrefix(line, "0::")
+		if after, ok := strings.CutPrefix(line, "0::"); ok {
+			rel = after
 			break
 		}
 	}
@@ -459,7 +459,7 @@ func (d *daemon) handleDirSize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]interface{}{
+	writeJSON(w, map[string]any{
 		"path": path,
 		"size": total,
 	})

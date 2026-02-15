@@ -474,7 +474,7 @@ func TestHandleSearch(t *testing.T) {
 		t.Fatalf("handleSearch status = %d, want 200; body=%s", rr.Code, rr.Body.String())
 	}
 
-	var results []map[string]interface{}
+	var results []map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &results); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -651,7 +651,7 @@ func TestHandleSubfolders(t *testing.T) {
 		t.Fatalf("handleSubfolders status = %d, want 200; body=%s", rr.Code, rr.Body.String())
 	}
 
-	var results []map[string]interface{}
+	var results []map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &results); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -745,7 +745,7 @@ func TestHandleEntries(t *testing.T) {
 		t.Fatalf("handleEntries status = %d, want 200; body=%s", rr.Code, rr.Body.String())
 	}
 
-	var results []map[string]interface{}
+	var results []map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &results); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -779,7 +779,7 @@ func TestServeOpenapi(t *testing.T) {
 		t.Fatalf("Content-Type = %q, want \"application/json\"", contentType)
 	}
 
-	var spec map[string]interface{}
+	var spec map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &spec); err != nil {
 		t.Fatalf("decode openapi spec: %v", err)
 	}
@@ -788,7 +788,7 @@ func TestServeOpenapi(t *testing.T) {
 		t.Fatalf("openapi version = %v, want \"3.0.0\"", spec["openapi"])
 	}
 
-	info, ok := spec["info"].(map[string]interface{})
+	info, ok := spec["info"].(map[string]any)
 	if !ok {
 		t.Fatalf("info field missing or invalid")
 	}
