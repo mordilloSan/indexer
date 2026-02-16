@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mordilloSan/go_logger/logger"
+	"github.com/mordilloSan/go-logger/logger"
 
 	"github.com/mordilloSan/indexer/cmd"
 	"github.com/mordilloSan/indexer/internal/version"
@@ -48,7 +48,11 @@ func main() {
 		return
 	}
 
-	logger.Init("production", *verbose)
+	levels := []logger.Level{logger.InfoLevel, logger.WarnLevel, logger.ErrorLevel, logger.FatalLevel}
+	if *verbose {
+		levels = logger.AllLevels()
+	}
+	logger.Init(logger.Config{Levels: levels})
 	mode := "daemon"
 	if *indexMode {
 		mode = "index"

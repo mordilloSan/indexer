@@ -10,7 +10,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/mordilloSan/go_logger/logger"
+	"github.com/mordilloSan/go-logger/logger"
 
 	"github.com/mordilloSan/indexer/indexing"
 )

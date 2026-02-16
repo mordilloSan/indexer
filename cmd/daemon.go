@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/mordilloSan/go_logger/logger"
+	"github.com/mordilloSan/go-logger/logger"
 
 	"github.com/mordilloSan/indexer/indexing"
 	"github.com/mordilloSan/indexer/storage"

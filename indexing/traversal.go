@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/mordilloSan/go_logger/logger"
+	"github.com/mordilloSan/go-logger/logger"
 
 	"github.com/mordilloSan/indexer/indexing/iteminfo"
 )
