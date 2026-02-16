@@ -185,6 +185,9 @@ func (idx *Index) shouldSkip(isDir bool, isHidden bool, fullCombined string) boo
 			if idx.isExternalMount(fullCombined) {
 				return true
 			}
+			if idx.isDockerOverlayMergedPath(fullCombined) {
+				return true
+			}
 		}
 	}
 
