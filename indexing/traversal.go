@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/mordilloSan/go_logger/logger"
+	"github.com/mordilloSan/go-logger/logger"
 
 	"github.com/mordilloSan/indexer/indexing/iteminfo"
 )
@@ -29,7 +29,11 @@ func (idx *Index) indexDirectory(adjustedPath string) error {
 		// must have been deleted
 		return err
 	}
-	defer func() { _ = dir.Close() }()
+	defer func() {
+		if closeErr := dir.Close(); closeErr != nil {
+			logger.Warnf("Failed to close directory %s: %v", realPath, closeErr)
+		}
+	}()
 
 	dirInfo, err := dir.Stat()
 	if err != nil {
@@ -179,6 +183,9 @@ func (idx *Index) shouldSkip(isDir bool, isHidden bool, fullCombined string) boo
 				return true
 			}
 			if idx.isExternalMount(fullCombined) {
+				return true
+			}
+			if idx.isDockerOverlayMergedPath(fullCombined) {
 				return true
 			}
 		}

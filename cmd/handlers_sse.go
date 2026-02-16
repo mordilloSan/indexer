@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mordilloSan/go_logger/logger"
+	"github.com/mordilloSan/go-logger/logger"
 
 	"github.com/mordilloSan/indexer/indexing"
 	"github.com/mordilloSan/indexer/storage"
@@ -55,6 +55,20 @@ func (s *SSEWriter) SendEvent(event string, data any) error {
 // SendError sends an error event
 func (s *SSEWriter) SendError(msg string) error {
 	return s.SendEvent("error", map[string]string{"message": msg})
+}
+
+func sendSSEEvent(s *SSEWriter, event string, data any) bool {
+	if err := s.SendEvent(event, data); err != nil {
+		logger.Warnf("SSE send %q failed: %v", event, err)
+		return false
+	}
+	return true
+}
+
+func sendSSEError(s *SSEWriter, msg string) {
+	if err := s.SendError(msg); err != nil {
+		logger.Warnf("SSE send error event failed: %v", err)
+	}
 }
 
 // ProgressEvent represents a progress update during indexing
@@ -119,10 +133,13 @@ func (d *daemon) handleReindexStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send initial event
-	_ = sse.SendEvent("started", map[string]string{
+	if !sendSSEEvent(sse, "started", map[string]string{
 		"status": "running",
 		"path":   normalizedPath,
-	})
+	}) {
+		d.unlockIndex()
+		return
+	}
 
 	// Run reindex with progress callback
 	go func() {
@@ -142,16 +159,18 @@ func (d *daemon) reindexPathWithProgress(ctx context.Context, relativePath strin
 	// Get the latest index ID
 	indexID, err := d.store.LatestIndexID(ctx)
 	if err != nil {
-		_ = sse.SendError(fmt.Sprintf("no index present: %v", err))
+		sendSSEError(sse, fmt.Sprintf("no index present: %v", err))
 		return
 	}
 
 	// Send progress: deleting old entries
-	_ = sse.SendEvent("progress", ProgressEvent{CurrentPath: "Deleting old entries..."})
+	if !sendSSEEvent(sse, "progress", ProgressEvent{CurrentPath: "Deleting old entries..."}) {
+		return
+	}
 
 	// Delete all entries under this path
 	if err := storage.DeletePathRecursive(ctx, d.db, indexID, relativePath); err != nil {
-		_ = sse.SendError(fmt.Sprintf("failed to delete existing entries: %v", err))
+		sendSSEError(sse, fmt.Sprintf("failed to delete existing entries: %v", err))
 		return
 	}
 
@@ -162,7 +181,7 @@ func (d *daemon) reindexPathWithProgress(ctx context.Context, relativePath strin
 	writer := storage.NewStreamingWriterWithProgress(ctx, d.db, indexID, 1000, func(filesWritten, dirsWritten int64, lastPath string) {
 		// Send progress every 100 entries to avoid overwhelming the client
 		if (filesWritten+dirsWritten)%100 == 0 {
-			_ = sse.SendEvent("progress", ProgressEvent{
+			sendSSEEvent(sse, "progress", ProgressEvent{
 				FilesIndexed: filesWritten,
 				DirsIndexed:  dirsWritten,
 				CurrentPath:  lastPath,
@@ -173,14 +192,16 @@ func (d *daemon) reindexPathWithProgress(ctx context.Context, relativePath strin
 
 	// Start indexing
 	if err := index.StartIndexingFromPath(relativePath); err != nil {
-		_ = writer.Close()
-		_ = sse.SendError(fmt.Sprintf("indexing failed: %v", err))
+		if closeErr := writer.Close(); closeErr != nil {
+			logger.Warnf("Failed to close streaming writer after reindex stream error: %v", closeErr)
+		}
+		sendSSEError(sse, fmt.Sprintf("indexing failed: %v", err))
 		return
 	}
 
 	// Flush remaining batches
 	if err := writer.Close(); err != nil {
-		_ = sse.SendError(fmt.Sprintf("streaming writer close: %v", err))
+		sendSSEError(sse, fmt.Sprintf("streaming writer close: %v", err))
 		return
 	}
 
@@ -188,7 +209,7 @@ func (d *daemon) reindexPathWithProgress(ctx context.Context, relativePath strin
 	scanTime := writer.ScanTime()
 	deleted, err := storage.CleanupDeletedEntriesUnderPath(ctx, d.db, indexID, relativePath, scanTime)
 	if err != nil {
-		_ = sse.SendError(fmt.Sprintf("cleanup deleted entries: %v", err))
+		sendSSEError(sse, fmt.Sprintf("cleanup deleted entries: %v", err))
 		return
 	}
 	if deleted > 0 {
@@ -203,13 +224,13 @@ func (d *daemon) reindexPathWithProgress(ctx context.Context, relativePath strin
 		WHERE index_id = ? AND (relative_path = ? OR relative_path LIKE ?);
 	`, indexID, relativePath, relativePath+"/%").Scan(&newSize)
 	if err != nil {
-		_ = sse.SendError(fmt.Sprintf("query new size: %v", err))
+		sendSSEError(sse, fmt.Sprintf("query new size: %v", err))
 		return
 	}
 
 	// Update parent sizes
 	if err := storage.UpdateParentDirectorySizes(ctx, d.db, indexID, relativePath, newSize); err != nil {
-		_ = sse.SendError(fmt.Sprintf("update parent sizes: %v", err))
+		sendSSEError(sse, fmt.Sprintf("update parent sizes: %v", err))
 		return
 	}
 
@@ -219,13 +240,15 @@ func (d *daemon) reindexPathWithProgress(ctx context.Context, relativePath strin
 	} else {
 		logger.Infof("WAL checkpoint complete after reindex in %v", stats.Duration)
 	}
-	_ = storage.ReleaseSQLiteMemory(ctx, d.db)
+	if err := storage.ReleaseSQLiteMemory(ctx, d.db); err != nil {
+		logger.Warnf("Failed to release SQLite memory after streaming reindex: %v", err)
+	}
 
 	duration := time.Since(start)
 	logger.Infof("Streaming reindex complete for path %s in %v", relativePath, duration)
 
 	// Send completion event
-	_ = sse.SendEvent("complete", ReindexCompleteEvent{
+	sendSSEEvent(sse, "complete", ReindexCompleteEvent{
 		Path:         relativePath,
 		FilesIndexed: int64(index.NumFiles),
 		DirsIndexed:  int64(index.NumDirs),
@@ -254,7 +277,10 @@ func (d *daemon) handleVacuumStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send initial event
-	_ = sse.SendEvent("started", map[string]string{"status": "running"})
+	if !sendSSEEvent(sse, "started", map[string]string{"status": "running"}) {
+		d.unlockIndex()
+		return
+	}
 
 	// Run vacuum with progress updates
 	go func() {
@@ -280,44 +306,54 @@ func (d *daemon) vacuumWithProgress(ctx context.Context, sse *SSEWriter) {
 	}
 
 	// Phase 1: Pre-checkpoint
-	_ = sse.SendEvent("progress", VacuumProgressEvent{
+	if !sendSSEEvent(sse, "progress", VacuumProgressEvent{
 		Phase:   "pre_checkpoint",
 		Message: "Running WAL checkpoint before vacuum...",
-	})
+	}) {
+		return
+	}
 
 	if _, err := storage.WALCheckpointTruncate(ctx, d.db); err != nil {
 		logger.Warnf("vacuum: wal checkpoint (pre) failed: %v", err)
-		_ = sse.SendEvent("progress", VacuumProgressEvent{
+		if !sendSSEEvent(sse, "progress", VacuumProgressEvent{
 			Phase:   "pre_checkpoint",
 			Message: fmt.Sprintf("WAL checkpoint warning: %v", err),
-		})
+		}) {
+			return
+		}
 	}
 
 	// Phase 2: Vacuum
-	_ = sse.SendEvent("progress", VacuumProgressEvent{
+	if !sendSSEEvent(sse, "progress", VacuumProgressEvent{
 		Phase:   "vacuum",
 		Message: "Running VACUUM (this may take a while)...",
-	})
+	}) {
+		return
+	}
 
 	vs, err := storage.Vacuum(ctx, d.db)
 	if err != nil {
 		logger.Errorf("vacuum failed: %v", err)
-		_ = sse.SendError(fmt.Sprintf("vacuum failed: %v", err))
+		sendSSEError(sse, fmt.Sprintf("vacuum failed: %v", err))
 		return
 	}
 
 	logger.Infof("Vacuum complete in %v", vs.Duration)
 
 	// Phase 3: Post-checkpoint
-	_ = sse.SendEvent("progress", VacuumProgressEvent{
+	if !sendSSEEvent(sse, "progress", VacuumProgressEvent{
 		Phase:   "post_checkpoint",
 		Message: "Running WAL checkpoint after vacuum...",
-	})
+	}) {
+		return
+	}
 
 	if _, err := storage.WALCheckpointTruncate(ctx, d.db); err != nil {
 		logger.Warnf("vacuum: wal checkpoint (post) failed: %v", err)
 	}
-	_ = storage.ReleaseSQLiteMemory(ctx, d.db)
+	if err := storage.ReleaseSQLiteMemory(ctx, d.db); err != nil {
+		logger.Warnf("Failed to release SQLite memory after vacuum stream: %v", err)
+	}
 
 	// Update duration metadata
 	if indexID != 0 {
@@ -329,7 +365,7 @@ func (d *daemon) vacuumWithProgress(ctx context.Context, sse *SSEWriter) {
 	duration := time.Since(start)
 
 	// Send completion event
-	_ = sse.SendEvent("complete", VacuumCompleteEvent{
+	sendSSEEvent(sse, "complete", VacuumCompleteEvent{
 		DurationMs: duration.Milliseconds(),
 	})
 }

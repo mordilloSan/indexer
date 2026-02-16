@@ -2,6 +2,7 @@ package indexing
 
 import (
 	"os"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -237,6 +238,36 @@ func TestShouldSkip(t *testing.T) {
 				t.Errorf("Expected shouldSkip=%v, got %v", tt.shouldSkip, result)
 			}
 		})
+	}
+}
+
+func TestShouldSkipDockerOverlayMergedWhenIndexingRoot(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("linux-specific path behavior")
+	}
+
+	idx := Initialize("test", "/", "/", true)
+
+	if !idx.shouldSkip(true, false, "/var/lib/docker/overlay2/layer123/merged") {
+		t.Fatal("expected docker overlay merged directory to be skipped")
+	}
+	if idx.shouldSkip(true, false, "/var/lib/docker/overlay2/layer123/diff") {
+		t.Fatal("expected docker overlay diff directory not to be skipped")
+	}
+}
+
+func TestShouldSkipDockerOverlayMergedWhenIndexingDockerRoot(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("linux-specific path behavior")
+	}
+
+	idx := Initialize("test", "/var/lib/docker", "/var/lib/docker", true)
+
+	if !idx.shouldSkip(true, false, "/overlay2/layer123/merged") {
+		t.Fatal("expected docker overlay merged directory to be skipped")
+	}
+	if idx.shouldSkip(true, false, "/overlay2/layer123/diff") {
+		t.Fatal("expected docker overlay diff directory not to be skipped")
 	}
 }
 

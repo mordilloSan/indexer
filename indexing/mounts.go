@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/mordilloSan/go_logger/logger"
+	"github.com/mordilloSan/go-logger/logger"
 )
 
 var (
@@ -30,6 +30,30 @@ var (
 	externalMountsOnce  sync.Once
 	externalMountPoints map[string]string
 )
+
+// isDockerOverlayMergedPath returns true for Docker overlay2 merged mount views.
+// These paths duplicate content already present under overlay2/*/diff.
+func (idx *Index) isDockerOverlayMergedPath(fullCombined string) bool {
+	realPath := idx.realPathFromCombined(fullCombined)
+	if realPath == "" {
+		return false
+	}
+
+	const dockerOverlayRoot = "/var/lib/docker/overlay2"
+	cleanPath := filepath.Clean(realPath)
+	if !strings.HasPrefix(cleanPath, dockerOverlayRoot+string(os.PathSeparator)) {
+		return false
+	}
+
+	// Expect: /var/lib/docker/overlay2/<layer-id>/merged[/...]
+	rest := strings.TrimPrefix(cleanPath, dockerOverlayRoot+string(os.PathSeparator))
+	parts := strings.Split(rest, string(os.PathSeparator))
+	if len(parts) < 2 {
+		return false
+	}
+
+	return parts[1] == "merged"
+}
 
 func (idx *Index) isLinuxSystemPath(fullCombined string) bool {
 	realPath := idx.realPathFromCombined(fullCombined)
@@ -97,7 +121,11 @@ func loadExternalMountPoints() map[string]string {
 		logger.Warnf("unable to read mountinfo: %v", err)
 		return mounts
 	}
-	defer func() { _ = file.Close() }()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			logger.Warnf("unable to close mountinfo file: %v", closeErr)
+		}
+	}()
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {

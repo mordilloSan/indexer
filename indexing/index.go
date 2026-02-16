@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mordilloSan/go_logger/logger"
+	"github.com/mordilloSan/go-logger/logger"
 )
 
 var (

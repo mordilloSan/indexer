@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/mordilloSan/go_logger/logger"
+	"github.com/mordilloSan/go-logger/logger"
 )
 
 type WALCheckpointStats struct {
