@@ -12,7 +12,11 @@ func TestResolveSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer func() { _ = os.RemoveAll(tempDir) }()
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Fatalf("Failed to remove temp dir: %v", err)
+		}
+	}()
 
 	// Create a target file
 	targetFile := filepath.Join(tempDir, "target.txt")
@@ -108,7 +112,11 @@ func TestResolveSymlinks_ChainedLinks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer func() { _ = os.RemoveAll(tempDir) }()
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Fatalf("Failed to remove temp dir: %v", err)
+		}
+	}()
 
 	// Create a target file
 	targetFile := filepath.Join(tempDir, "target.txt")
@@ -153,7 +161,11 @@ func TestIsDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer func() { _ = os.RemoveAll(tempDir) }()
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Fatalf("Failed to remove temp dir: %v", err)
+		}
+	}()
 
 	// Create a file
 	testFile := filepath.Join(tempDir, "file.txt")

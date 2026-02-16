@@ -330,12 +330,16 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		for _, srv := range d.servers {
-			_ = srv.Shutdown(context.Background())
+			if err := srv.Shutdown(context.Background()); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Warnf("Server shutdown error: %v", err)
+			}
 		}
 		return nil
 	case err := <-errCh:
 		for _, srv := range d.servers {
-			_ = srv.Shutdown(context.Background())
+			if shutdownErr := srv.Shutdown(context.Background()); shutdownErr != nil && !errors.Is(shutdownErr, http.ErrServerClosed) {
+				logger.Warnf("Server shutdown error: %v", shutdownErr)
+			}
 		}
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
@@ -389,7 +393,9 @@ func (d *daemon) reindexPath(ctx context.Context, relativePath string) error {
 
 	// Start indexing from the specific subdirectory
 	if err := index.StartIndexingFromPath(relativePath); err != nil {
-		_ = writer.Close()
+		if closeErr := writer.Close(); closeErr != nil {
+			logger.Warnf("Failed to close streaming writer after reindex error: %v", closeErr)
+		}
 		return fmt.Errorf("indexing failed: %w", err)
 	}
 
@@ -437,7 +443,9 @@ func (d *daemon) reindexPath(ctx context.Context, relativePath string) error {
 	} else {
 		logger.Infof("WAL checkpoint complete after reindex in %v (busy=%d log=%d checkpointed=%d)", stats.Duration, stats.Busy, stats.Log, stats.Checkpointed)
 	}
-	_ = storage.ReleaseSQLiteMemory(ctx, d.db)
+	if err := storage.ReleaseSQLiteMemory(ctx, d.db); err != nil {
+		logger.Warnf("Failed to release SQLite memory after reindex: %v", err)
+	}
 
 	return nil
 }
@@ -537,7 +545,9 @@ func runIndex(ctx context.Context, db *sql.DB, indexName, indexPath string, incl
 	// Start filesystem traversal
 	logger.Infof("Starting filesystem traversal...")
 	if err := index.StartIndexing(); err != nil {
-		_ = writer.Close()
+		if closeErr := writer.Close(); closeErr != nil {
+			logger.Warnf("Failed to close streaming writer after index error: %v", closeErr)
+		}
 		return fmt.Errorf("indexing failed: %w", err)
 	}
 
@@ -590,7 +600,9 @@ func runIndex(ctx context.Context, db *sql.DB, indexName, indexPath string, incl
 	} else {
 		logger.Infof("WAL checkpoint complete after index in %v (busy=%d log=%d checkpointed=%d)", stats.Duration, stats.Busy, stats.Log, stats.Checkpointed)
 	}
-	_ = storage.ReleaseSQLiteMemory(ctx, db)
+	if err := storage.ReleaseSQLiteMemory(ctx, db); err != nil {
+		logger.Warnf("Failed to release SQLite memory after index: %v", err)
+	}
 
 	return nil
 }
@@ -603,13 +615,18 @@ func prepareIndexRecord(ctx context.Context, db *sql.DB, indexName, indexPath st
 	}
 	defer func() {
 		if err != nil {
-			_ = tx.Rollback()
+			if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+				logger.Warnf("prepareIndexRecord rollback failed: %v", rollbackErr)
+			}
 		}
 	}()
 
 	// Get existing last_indexed timestamp if available
 	var existingLastIndexed sql.NullInt64
-	_ = tx.QueryRowContext(ctx, `SELECT last_indexed FROM indexes WHERE name = ?;`, indexName).Scan(&existingLastIndexed)
+	scanErr := tx.QueryRowContext(ctx, `SELECT last_indexed FROM indexes WHERE name = ?;`, indexName).Scan(&existingLastIndexed)
+	if scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
+		return 0, fmt.Errorf("query existing last_indexed: %w", scanErr)
+	}
 	lastIndexed := int64(0)
 	if existingLastIndexed.Valid {
 		lastIndexed = existingLastIndexed.Int64
@@ -679,8 +696,12 @@ func openDatabaseWithIntegrityCheck(dbPath string) (*sql.DB, bool, error) {
 			if err := os.Remove(dbPath); err != nil {
 				return nil, false, fmt.Errorf("failed to remove corrupted database: %w", err)
 			}
-			_ = os.Remove(dbPath + "-wal")
-			_ = os.Remove(dbPath + "-shm")
+			if err := os.Remove(dbPath + "-wal"); err != nil && !errors.Is(err, os.ErrNotExist) {
+				logger.Warnf("Failed to remove WAL sidecar %s-wal: %v", dbPath, err)
+			}
+			if err := os.Remove(dbPath + "-shm"); err != nil && !errors.Is(err, os.ErrNotExist) {
+				logger.Warnf("Failed to remove SHM sidecar %s-shm: %v", dbPath, err)
+			}
 			// Recreate fresh database
 			db, err = storage.Open(dbPath)
 			if err != nil {

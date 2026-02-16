@@ -37,7 +37,9 @@ func (d *daemon) handleIndex(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	w.WriteHeader(http.StatusAccepted)
-	_, _ = w.Write([]byte(`{"status":"running"}`))
+	if _, err := w.Write([]byte(`{"status":"running"}`)); err != nil {
+		logger.Warnf("handleIndex: failed to write response: %v", err)
+	}
 }
 
 func (d *daemon) handleReindex(w http.ResponseWriter, r *http.Request) {
@@ -117,7 +119,9 @@ func (d *daemon) handleVacuum(w http.ResponseWriter, r *http.Request) {
 		if _, err := storage.WALCheckpointTruncate(ctx, d.db); err != nil {
 			logger.Warnf("vacuum: wal checkpoint (post) failed: %v", err)
 		}
-		_ = storage.ReleaseSQLiteMemory(ctx, d.db)
+		if err := storage.ReleaseSQLiteMemory(ctx, d.db); err != nil {
+			logger.Warnf("vacuum: failed to release SQLite memory: %v", err)
+		}
 
 		if indexID != 0 {
 			if _, err := d.db.ExecContext(ctx, `UPDATE indexes SET vacuum_duration_ms = ? WHERE id = ?;`, vs.Duration.Milliseconds(), indexID); err != nil {
@@ -180,7 +184,9 @@ func (d *daemon) handlePrune(w http.ResponseWriter, r *http.Request) {
 		if _, err := storage.WALCheckpointTruncate(ctx, d.db); err != nil {
 			logger.Warnf("prune: wal checkpoint failed: %v", err)
 		}
-		_ = storage.ReleaseSQLiteMemory(ctx, d.db)
+		if err := storage.ReleaseSQLiteMemory(ctx, d.db); err != nil {
+			logger.Warnf("prune: failed to release SQLite memory: %v", err)
+		}
 	}()
 
 	w.WriteHeader(http.StatusAccepted)
@@ -578,7 +584,9 @@ func (d *daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		logger.Warnf("failed to encode JSON response: %v", err)
+	}
 }
 
 // queryInt parses an integer query parameter with default and minimum value.
@@ -608,7 +616,9 @@ func queryPathOrRoot(path string) (string, bool) {
 // Minimal OpenAPI spec served at /openapi.json.
 func serveOpenapi(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(openapiSpec))
+	if _, err := w.Write([]byte(openapiSpec)); err != nil {
+		logger.Warnf("failed to write OpenAPI response: %v", err)
+	}
 }
 
 const openapiSpec = `{

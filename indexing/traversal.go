@@ -29,7 +29,11 @@ func (idx *Index) indexDirectory(adjustedPath string) error {
 		// must have been deleted
 		return err
 	}
-	defer func() { _ = dir.Close() }()
+	defer func() {
+		if closeErr := dir.Close(); closeErr != nil {
+			logger.Warnf("Failed to close directory %s: %v", realPath, closeErr)
+		}
+	}()
 
 	dirInfo, err := dir.Stat()
 	if err != nil {

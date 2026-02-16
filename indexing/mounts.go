@@ -97,7 +97,11 @@ func loadExternalMountPoints() map[string]string {
 		logger.Warnf("unable to read mountinfo: %v", err)
 		return mounts
 	}
-	defer func() { _ = file.Close() }()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			logger.Warnf("unable to close mountinfo file: %v", closeErr)
+		}
+	}()
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {

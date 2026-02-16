@@ -29,7 +29,11 @@ func TestFullIndexIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+	}()
 	enableInlineIndexing(t)
 
 	// Create test filesystem
@@ -133,7 +137,11 @@ func TestSearchIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+	}()
 	enableInlineIndexing(t)
 
 	// Create test filesystem
@@ -243,7 +251,11 @@ func TestDirSizeIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+	}()
 	enableInlineIndexing(t)
 
 	// Create filesystem with known sizes
@@ -397,7 +409,11 @@ func TestAddDeleteSizePropagation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+	}()
 	enableInlineIndexing(t)
 
 	testRoot := t.TempDir()
@@ -502,7 +518,11 @@ func TestStatusIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+	}()
 	enableInlineIndexing(t)
 
 	testRoot := t.TempDir()
@@ -615,7 +635,11 @@ func newIndexedDaemon(t *testing.T, buildFS func(root string)) indexedDaemon {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close db: %v", err)
+		}
+	})
 	enableInlineIndexing(t)
 
 	root := t.TempDir()

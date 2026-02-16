@@ -23,7 +23,11 @@ func TestHandleAddAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+	}()
 
 	d := &daemon{
 		cfg: DaemonConfig{
@@ -207,7 +211,9 @@ func TestHandleStatusWhileIndexingIgnoresDBErrors(t *testing.T) {
 
 	// Simulate an in-progress index and a temporarily unavailable DB.
 	d.running.Store(true)
-	_ = db.Close()
+	if err := db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
 	rr := httptest.NewRecorder()
@@ -239,7 +245,11 @@ func TestHandleIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+	}()
 
 	d := &daemon{
 		cfg: DaemonConfig{
@@ -290,7 +300,11 @@ func TestHandleIndexConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+	}()
 
 	d := &daemon{
 		cfg: DaemonConfig{
@@ -321,7 +335,11 @@ func TestHandleVacuum(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+	}()
 
 	d := &daemon{
 		cfg: DaemonConfig{
@@ -368,7 +386,11 @@ func TestHandleVacuumConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+	}()
 
 	d := &daemon{
 		cfg: DaemonConfig{
@@ -398,7 +420,11 @@ func TestHandleSearch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+	}()
 
 	d := &daemon{
 		cfg: DaemonConfig{
@@ -491,7 +517,11 @@ func TestHandleDirSize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+	}()
 
 	d := &daemon{
 		cfg: DaemonConfig{
@@ -575,7 +605,11 @@ func TestHandleSubfolders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+	}()
 
 	d := &daemon{
 		cfg: DaemonConfig{
@@ -669,7 +703,11 @@ func TestHandleEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+	}()
 
 	d := &daemon{
 		cfg: DaemonConfig{
@@ -805,7 +843,11 @@ func TestHandleReindex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+	}()
 
 	d := &daemon{
 		cfg: DaemonConfig{
@@ -915,7 +957,11 @@ func setupHandleReindexEnv(t *testing.T) handleReindexEnv {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close db: %v", err)
+		}
+	})
 
 	testRoot := t.TempDir()
 	testDir := filepath.Join(testRoot, "data")
@@ -1034,7 +1080,11 @@ func newDaemonWithDB(t *testing.T) (*daemon, int64) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close db: %v", err)
+		}
+	})
 
 	d := &daemon{
 		cfg: DaemonConfig{
