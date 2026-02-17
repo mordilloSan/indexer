@@ -146,24 +146,6 @@ curl --unix-socket /tmp/indexer.sock -X POST 'http://localhost/reindex?path=/pro
 
 Response: `{"status":"running","path":"/projects/work"}` with `202 Accepted`. Returns `400` when `path` is missing, or `409` if another index/reindex is already running.
 
-#### `POST /reindex/stream?path=<subpath>`
-
-Same as `/reindex`, but returns a Server-Sent Events (SSE) stream with real-time progress updates instead of returning immediately.
-
-```bash
-curl --unix-socket /tmp/indexer.sock -N -X POST 'http://localhost/reindex/stream?path=/projects/work'
-```
-
-The `-N` flag disables buffering so events stream in real-time.
-
-**Event types:**
-- `started` - Operation began: `{"status":"running","path":"/projects/work"}`
-- `progress` - Periodic updates (every 100 entries): `{"files_indexed":1500,"dirs_indexed":42,"current_path":"/projects/work/src"}`
-- `complete` - Final stats: `{"path":"/projects/work","files_indexed":4500,"dirs_indexed":120,"total_size":1073741824,"duration_ms":2340}`
-- `error` - If something goes wrong: `{"message":"error description"}`
-
-Returns `400` when `path` is missing, or `409` if another index/reindex is already running.
-
 #### `POST /vacuum`
 
 Reclaim disk space by running SQLite `VACUUM` in the background. This can take a while on large databases and requires an exclusive lock, so queries may block briefly while it runs.
@@ -173,23 +155,6 @@ curl --unix-socket /tmp/indexer.sock -X POST http://localhost/vacuum
 ```
 
 Response: `{"status":"running"}` with `202 Accepted`. Returns `409 Conflict` if another index/reindex/vacuum is already running.
-
-#### `POST /vacuum/stream`
-
-Same as `/vacuum`, but returns a Server-Sent Events (SSE) stream with real-time progress updates.
-
-```bash
-curl --unix-socket /tmp/indexer.sock -N -X POST http://localhost/vacuum/stream
-```
-
-**Event types:**
-- `started` - Operation began: `{"status":"running"}`
-- `progress` - Phase updates: `{"phase":"vacuum","message":"Running VACUUM (this may take a while)..."}`
-  - Phases: `pre_checkpoint`, `vacuum`, `post_checkpoint`
-- `complete` - Final stats: `{"duration_ms":5420}`
-- `error` - If something goes wrong: `{"message":"error description"}`
-
-Returns `409 Conflict` if another index/reindex/vacuum is already running.
 
 #### `POST /prune?keep_latest=<n>&max_age_days=<days>`
 
@@ -213,6 +178,22 @@ Returns `409 Conflict` if another index/reindex/vacuum/prune is already running.
 
 **Note:** Pruning is useful when you've re-indexed multiple times and want to clean up old data. After pruning, consider running `/vacuum` to fully compact the database file. The database uses incremental auto-vacuum, so space is reclaimed automatically, but a full `VACUUM` defragments the file.
 
+#### `GET /status?stream=true` (SSE attach while work is running)
+
+Use a single SSE endpoint for all active background work (`index`, `reindex`, `vacuum`, `prune`).
+
+```bash
+curl --unix-socket /tmp/indexer.sock -N -H 'Accept: text/event-stream' 'http://localhost/status?stream=true'
+```
+
+If no work is running, `/status` falls back to normal JSON status.
+
+Event names:
+- `started`: includes operation metadata (for example `{"status":"running","operation":"reindex","path":"/projects/work"}`)
+- `progress`: operation-specific progress (for example files/dirs for reindex, phase/message for vacuum/prune)
+- `complete`: final operation stats
+- `error`: `{"message":"..."}`
+
 #### `GET /status`
 
 Returns daemon state and stats from the most recent index.
@@ -230,6 +211,7 @@ Notes:
 - `last_indexed` may be empty if the index has never been run.
 - When the daemon is indexing and the DB is temporarily unavailable, the response may include a `warning` field.
 - `database_size` is the main SQLite file only; `total_on_disk` includes `-wal` and `-shm` sidecars.
+- When work is running, `active_operation` and `active_path` may be present in the JSON response.
 
 #### `GET /search?q=<term>&limit=<n>`
 

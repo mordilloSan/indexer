@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -38,6 +39,8 @@ type daemon struct {
 	store           *storage.Store
 	servers         []*http.Server
 	running         atomic.Bool
+	workStreamMu    sync.RWMutex
+	workStream      *workStreamBroadcaster
 	usedSystemdSock bool
 }
 
@@ -274,9 +277,7 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 	mux.HandleFunc("/openapi.json", serveOpenapi)
 	mux.HandleFunc("/index", d.handleIndex)
 	mux.HandleFunc("/reindex", d.handleReindex)
-	mux.HandleFunc("/reindex/stream", d.handleReindexStream)
 	mux.HandleFunc("/vacuum", d.handleVacuum)
-	mux.HandleFunc("/vacuum/stream", d.handleVacuumStream)
 	mux.HandleFunc("/prune", d.handlePrune)
 	mux.HandleFunc("/status", d.handleStatus)
 	mux.HandleFunc("/search", d.handleSearch)
@@ -354,6 +355,27 @@ func (d *daemon) tryLockIndex() bool {
 
 func (d *daemon) unlockIndex() {
 	d.running.Store(false)
+}
+
+func (d *daemon) setWorkStreamBroadcaster(b *workStreamBroadcaster) {
+	d.workStreamMu.Lock()
+	d.workStream = b
+	d.workStreamMu.Unlock()
+}
+
+func (d *daemon) getWorkStreamBroadcaster() *workStreamBroadcaster {
+	d.workStreamMu.RLock()
+	b := d.workStream
+	d.workStreamMu.RUnlock()
+	return b
+}
+
+func (d *daemon) clearWorkStreamBroadcaster(b *workStreamBroadcaster) {
+	d.workStreamMu.Lock()
+	if d.workStream == b {
+		d.workStream = nil
+	}
+	d.workStreamMu.Unlock()
 }
 
 // runIndexOnce performs an index by spawning the binary in index mode
