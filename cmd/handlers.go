@@ -30,11 +30,29 @@ func (d *daemon) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "indexer already running", http.StatusConflict)
 		return
 	}
+
+	stream := d.beginWorkStream("index", "")
 	go func() {
 		defer d.unlockIndex()
+		defer d.endWorkStream(stream)
+
+		start := time.Now()
+		sendSSEEvent(stream, "started", WorkStartedEvent{
+			Status:    "running",
+			Operation: "index",
+		})
+
 		if err := d.runIndexSubprocess(context.Background()); err != nil {
 			logger.Errorf("manual index failed: %v", err)
+			sendSSEError(stream, fmt.Sprintf("index failed: %v", err))
+			return
 		}
+
+		sendSSEEvent(stream, "complete", WorkCompleteEvent{
+			Status:     "complete",
+			Operation:  "index",
+			DurationMs: time.Since(start).Milliseconds(),
+		})
 	}()
 	w.WriteHeader(http.StatusAccepted)
 	if _, err := w.Write([]byte(`{"status":"running"}`)); err != nil {
@@ -68,11 +86,16 @@ func (d *daemon) handleReindex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	stream := d.beginWorkStream("reindex", normalizedPath)
 	go func() {
 		defer d.unlockIndex()
-		if err := d.reindexPath(context.Background(), normalizedPath); err != nil {
-			logger.Errorf("reindex failed for path %s: %v", normalizedPath, err)
-		}
+		defer d.endWorkStream(stream)
+		sendSSEEvent(stream, "started", WorkStartedEvent{
+			Status:    "running",
+			Operation: "reindex",
+			Path:      normalizedPath,
+		})
+		d.reindexPathWithProgress(context.Background(), normalizedPath, stream)
 	}()
 
 	w.WriteHeader(http.StatusAccepted)
@@ -93,41 +116,15 @@ func (d *daemon) handleVacuum(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	stream := d.beginWorkStream("vacuum", "")
 	go func() {
 		defer d.unlockIndex()
-
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Hour)
-		defer cancel()
-
-		indexID, err := d.store.LatestIndexID(ctx)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			logger.Warnf("vacuum: latest index id unavailable: %v", err)
-			indexID = 0
-		}
-
-		if _, err := storage.WALCheckpointTruncate(ctx, d.db); err != nil {
-			logger.Warnf("vacuum: wal checkpoint (pre) failed: %v", err)
-		}
-
-		vs, err := storage.Vacuum(ctx, d.db)
-		if err != nil {
-			logger.Errorf("vacuum failed: %v", err)
-			return
-		}
-		logger.Infof("Vacuum complete in %v", vs.Duration)
-
-		if _, err := storage.WALCheckpointTruncate(ctx, d.db); err != nil {
-			logger.Warnf("vacuum: wal checkpoint (post) failed: %v", err)
-		}
-		if err := storage.ReleaseSQLiteMemory(ctx, d.db); err != nil {
-			logger.Warnf("vacuum: failed to release SQLite memory: %v", err)
-		}
-
-		if indexID != 0 {
-			if _, err := d.db.ExecContext(ctx, `UPDATE indexes SET vacuum_duration_ms = ? WHERE id = ?;`, vs.Duration.Milliseconds(), indexID); err != nil {
-				logger.Warnf("vacuum: failed to persist duration: %v", err)
-			}
-		}
+		defer d.endWorkStream(stream)
+		sendSSEEvent(stream, "started", WorkStartedEvent{
+			Status:    "running",
+			Operation: "vacuum",
+		})
+		d.vacuumWithProgress(context.Background(), stream)
 	}()
 
 	w.WriteHeader(http.StatusAccepted)
@@ -164,29 +161,15 @@ func (d *daemon) handlePrune(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	stream := d.beginWorkStream("prune", "")
 	go func() {
 		defer d.unlockIndex()
-
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Hour)
-		defer cancel()
-
-		maxAge := time.Duration(maxAgeDays) * 24 * time.Hour
-		stats, err := d.store.PruneOldIndexes(ctx, keepLatest, maxAge)
-		if err != nil {
-			logger.Errorf("prune failed: %v", err)
-			return
-		}
-
-		logger.Infof("Prune complete in %v (deleted %d indexes, %d entries)",
-			stats.Duration, stats.DeletedIndexes, stats.DeletedEntries)
-
-		// Run WAL checkpoint and release memory after pruning
-		if _, err := storage.WALCheckpointTruncate(ctx, d.db); err != nil {
-			logger.Warnf("prune: wal checkpoint failed: %v", err)
-		}
-		if err := storage.ReleaseSQLiteMemory(ctx, d.db); err != nil {
-			logger.Warnf("prune: failed to release SQLite memory: %v", err)
-		}
+		defer d.endWorkStream(stream)
+		sendSSEEvent(stream, "started", WorkStartedEvent{
+			Status:    "running",
+			Operation: "prune",
+		})
+		d.pruneWithProgress(context.Background(), keepLatest, maxAgeDays, stream)
 	}()
 
 	w.WriteHeader(http.StatusAccepted)
@@ -198,6 +181,10 @@ func (d *daemon) handlePrune(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if wantsStatusSSE(r) && d.attachStatusSSEIfActive(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 	running := d.running.Load()
 
@@ -225,11 +212,17 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		CgroupCurrent       int64  `json:"cgroup_memory_current_bytes"`
 		CgroupAnon          int64  `json:"cgroup_memory_anon_bytes"`
 		CgroupFile          int64  `json:"cgroup_memory_file_bytes"`
+		ActiveOperation     string `json:"active_operation,omitempty"`
+		ActivePath          string `json:"active_path,omitempty"`
 		Warning             string `json:"warning,omitempty"`
 	}
 
 	if running {
 		resp.Status = "running"
+		if active := d.getWorkStreamBroadcaster(); active != nil {
+			resp.ActiveOperation = active.Operation()
+			resp.ActivePath = active.Path()
+		}
 	} else {
 		resp.Status = "idle"
 	}
@@ -627,11 +620,9 @@ const openapiSpec = `{
   "paths": {
     "/index": { "post": { "summary": "Trigger full index", "responses": { "202": {"description": "Started"}, "409": {"description": "Already running"} } } },
     "/reindex": { "post": { "summary": "Reindex a specific path", "parameters": [{ "in": "query", "name": "path", "required": true, "schema": {"type": "string"}, "description": "Path to reindex (e.g., /home/user)" }], "responses": { "202": {"description": "Started"}, "400": {"description": "Path required"}, "409": {"description": "Already running"} } } },
-    "/reindex/stream": { "post": { "summary": "Reindex with SSE progress stream", "description": "Server-Sent Events stream with progress updates. Events: started, progress, complete, error", "parameters": [{ "in": "query", "name": "path", "required": true, "schema": {"type": "string"}, "description": "Path to reindex" }], "responses": { "200": {"description": "SSE stream", "content": {"text/event-stream": {}}}, "400": {"description": "Path required"}, "409": {"description": "Already running"} } } },
     "/vacuum": { "post": { "summary": "Reclaim disk space (VACUUM)", "responses": { "202": {"description": "Started"}, "409": {"description": "Already running"} } } },
-    "/vacuum/stream": { "post": { "summary": "Vacuum with SSE progress stream", "description": "Server-Sent Events stream with progress updates. Events: started, progress, complete, error", "responses": { "200": {"description": "SSE stream", "content": {"text/event-stream": {}}}, "409": {"description": "Already running"} } } },
     "/prune": { "post": { "summary": "Prune old index records", "description": "Remove old index records and their entries to reclaim space", "parameters": [{ "in": "query", "name": "keep_latest", "schema": {"type": "integer", "default": 1}, "description": "Number of most recent indexes to keep (minimum 1)" }, { "in": "query", "name": "max_age_days", "schema": {"type": "integer", "default": 30}, "description": "Maximum age in days for indexes to keep" }], "responses": { "202": {"description": "Started"}, "409": {"description": "Already running"} } } },
-    "/status": { "get": { "summary": "Get status", "responses": { "200": {"description": "Status"} } } },
+    "/status": { "get": { "summary": "Get status or attach to active work SSE stream", "parameters": [{ "in": "query", "name": "stream", "schema": {"type": "boolean"}, "description": "Set true (or send Accept: text/event-stream) to attach to active work stream; falls back to JSON when idle" }], "responses": { "200": {"description": "Status JSON or SSE stream", "content": {"application/json": {}, "text/event-stream": {}}} } } },
     "/search": { "get": { "summary": "Search entries (returns type: folder/file)", "parameters": [{ "in": "query", "name": "q", "schema": {"type": "string"} }, { "in": "query", "name": "limit", "schema": {"type": "integer"} }], "responses": { "200": {"description": "Results with type field indicating folder or file"} } } },
     "/subfolders": { "get": { "summary": "Get direct subfolders with sizes", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"}, "description": "Parent path (defaults to /)" }], "responses": { "200": {"description": "Array of direct subfolders with their sizes"} } } },
     "/dirsize": { "get": { "summary": "Directory size", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"} }], "responses": { "200": {"description": "Size"} } } },
