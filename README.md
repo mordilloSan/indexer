@@ -369,10 +369,55 @@ Indexes: `idx_entries_index_id` on `index_id`, and `idx_entries_path` unique on 
 
 ## Development
 
-- Build: `make build` (or `go build -o indexer .`)
+- Build: `make build`
+- Compile only: `make build-only` (or `go build -o indexer .`)
+- Local install: `make localinstall`
 - Tests: `make test`
 - Lint: `make golint`
 - Benchmarks: `make benchmark`
+- Generate PGO profile: `make pgo`
+- Compare PGO vs no-PGO: `make compare-pgo`
+
+### PGO Workflow
+
+`make pgo` builds a non-PGO binary, profiles the real filesystem workload at `/` by default, captures representative CPU profiles for a fresh and incremental index run, merges them into `default.pgo`, and prints a short `pprof` summary.
+
+`default.pgo` is kept as optional profiling data for experiments. The default local and CI builds no longer use `-pgo=auto`.
+
+In the default `real` mode, `make pgo` authenticates with `sudo` up front and runs the profiling passes as root so indexing `/` does not get blocked by permission errors. The build and merged `default.pgo` output remain owned by your user.
+
+You can override the default workload path:
+
+```bash
+PGO_MODE=real PGO_PATH=/some/path make pgo
+```
+
+Useful knobs:
+
+- `PGO_MODE=real|synthetic` chooses between an existing filesystem path and a generated dataset. Default: `real`.
+- `PGO_PATH=/path` selects the real workload path. Default: `/`.
+- `PGO_INCLUDE_HIDDEN=true|false` controls whether hidden files are included while profiling.
+- `PGO_USE_SUDO=true|false` controls whether the profiling runs use `sudo`. Default: `true` for real mode, `false` for synthetic mode.
+- `OUTPUT_PGO=/path/to/default.pgo` writes the merged profile somewhere other than the repo root.
+
+In `real` mode the script does not mutate the target tree; it profiles one fresh pass and one incremental pass against the same path and database.
+
+### PGO Comparison
+
+Use `make compare-pgo` to build both variants and benchmark them against the same workload with `sudo`:
+
+```bash
+make compare-pgo
+```
+
+Useful knobs:
+
+- `COMPARE_PGO_PATH=/path` chooses the benchmark target path. Default: `/`.
+- `COMPARE_PGO_RUNS=3` sets the number of measured runs per binary. Default: `2`.
+- `COMPARE_PGO_WARMUPS=1` sets the number of warm-up runs before measuring. Default: `1`.
+- `COMPARE_PGO_USE_SUDO=true|false` controls whether the benchmark runs under `sudo`. Default: `true`.
+
+This is the intended way to decide whether a future PGO-enabled build should be reintroduced.
 
 ### Benchmarking
 

@@ -4,6 +4,6 @@
 
 indexer
 .cache
+.claude
 .vscode
-.go*
 .benchmark*

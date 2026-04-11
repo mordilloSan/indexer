@@ -27,6 +27,7 @@ type DaemonConfig struct {
 	IndexName     string
 	IndexPath     string
 	IncludeHidden bool
+	FreshIndex    bool
 	DBPath        string
 	SocketPath    string
 	ListenAddr    string
@@ -286,6 +287,7 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 	mux.HandleFunc("/add", d.handleAdd)
 	mux.HandleFunc("/delete", d.handleDelete)
 	mux.HandleFunc("/entries", d.handleEntries)
+	mux.HandleFunc("/config", d.handleConfig)
 
 	errCh := make(chan error, 2)
 	serverCount := 0
@@ -389,89 +391,6 @@ func (d *daemon) runIndexOnce(ctx context.Context) error {
 
 var indexerSpawnOverride func(*daemon, context.Context) error
 
-// reindexPath reindexes a specific subdirectory within the index
-func (d *daemon) reindexPath(ctx context.Context, relativePath string) error {
-	logger.Infof("Starting reindex for path: %s", relativePath)
-
-	// Get the latest index ID
-	indexID, err := d.store.LatestIndexID(ctx)
-	if err != nil {
-		return fmt.Errorf("no index present: %w", err)
-	}
-
-	// Delete all entries under this path (and propagate size changes to parents)
-	if err := storage.DeletePathRecursive(ctx, d.db, indexID, relativePath); err != nil {
-		return fmt.Errorf("failed to delete existing entries: %w", err)
-	}
-	logger.Infof("Deleted existing entries under %s", relativePath)
-
-	// Create index instance with the ORIGINAL root path
-	// This ensures entries are created with correct relative paths
-	index := indexing.Initialize(d.cfg.IndexName, d.cfg.IndexPath, d.cfg.IndexPath, d.cfg.IncludeHidden)
-
-	// Create streaming writer with batch size of 1000
-	writer := storage.NewStreamingWriter(ctx, d.db, indexID, 1000)
-	index.EnableStreaming(writer)
-
-	// Start indexing from the specific subdirectory
-	if err := index.StartIndexingFromPath(relativePath); err != nil {
-		if closeErr := writer.Close(); closeErr != nil {
-			logger.Warnf("Failed to close streaming writer after reindex error: %v", closeErr)
-		}
-		return fmt.Errorf("indexing failed: %w", err)
-	}
-
-	// Flush remaining batches
-	if err := writer.Close(); err != nil {
-		return fmt.Errorf("streaming writer close: %w", err)
-	}
-
-	// Cleanup deleted entries under this path (files that were not seen during this scan)
-	scanTime := writer.ScanTime()
-	deleted, err := storage.CleanupDeletedEntriesUnderPath(ctx, d.db, indexID, relativePath, scanTime)
-	if err != nil {
-		return fmt.Errorf("cleanup deleted entries: %w", err)
-	}
-	if deleted > 0 {
-		logger.Infof("Cleaned up %d deleted entries under %s", deleted, relativePath)
-	}
-
-	// Get the new total size of the reindexed path
-	var newSize int64
-	err = d.db.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(size), 0)
-		FROM entries
-		WHERE index_id = ? AND (relative_path = ? OR relative_path LIKE ?);
-	`, indexID, relativePath, relativePath+"/%").Scan(&newSize)
-	if err != nil {
-		return fmt.Errorf("query new size: %w", err)
-	}
-
-	// Propagate the size change to parent directories
-	// We already subtracted the old size during deletion, now add the new size
-	if err := storage.UpdateParentDirectorySizes(ctx, d.db, indexID, relativePath, newSize); err != nil {
-		return fmt.Errorf("update parent sizes: %w", err)
-	}
-
-	logger.Infof("Reindex complete for path %s (dirs=%d files=%d, total_size=%d)",
-		relativePath,
-		index.NumDirs,
-		index.NumFiles,
-		newSize,
-	)
-
-	if stats, err := storage.WALCheckpointTruncate(ctx, d.db); err != nil {
-		logger.Warnf("WAL checkpoint failed after reindex: %v", err)
-	} else {
-		logger.Infof("WAL checkpoint complete after reindex in %v (busy=%d log=%d checkpointed=%d)", stats.Duration, stats.Busy, stats.Log, stats.Checkpointed)
-	}
-	if err := storage.ReleaseSQLiteMemory(ctx, d.db); err != nil {
-		logger.Warnf("Failed to release SQLite memory after reindex: %v", err)
-	}
-
-	return nil
-}
-
 // runIndexSubprocess spawns the current binary with --index-mode flag
 // Uses systemd-run --scope to isolate memory accounting from the daemon's cgroup
 func (d *daemon) runIndexSubprocess(ctx context.Context) error {
@@ -487,6 +406,9 @@ func (d *daemon) runIndexSubprocess(ctx context.Context) error {
 	}
 	if d.cfg.IncludeHidden {
 		args = append(args, "--include-hidden")
+	}
+	if d.cfg.FreshIndex {
+		args = append(args, "--fresh")
 	}
 
 	// Use systemd-run to spawn in a separate cgroup/scope
@@ -524,14 +446,14 @@ func (d *daemon) runIndexSubprocess(ctx context.Context) error {
 	return nil
 }
 
-// RunIndexMode is called from main when --index-mode flag is set
-// It performs the index and exits (releasing all memory including leaks)
-func RunIndexMode(indexName, indexPath string, includeHidden bool, dbPath string, verbose bool) {
-	logger.Infof("Running in index mode: path=%s name=%s db=%s", indexPath, indexName, dbPath)
+// RunIndexMode is called from main when -index-mode flag is set.
+// It performs the index and returns when complete.
+func RunIndexMode(indexName, indexPath string, includeHidden, fresh bool, dbPath string, verbose bool) error {
+	logger.Infof("Running in index mode: path=%s name=%s db=%s fresh=%t", indexPath, indexName, dbPath, fresh)
 
 	db, _, err := openDatabaseWithIntegrityCheck(dbPath)
 	if err != nil {
-		logger.Fatalf("Failed to open database: %v", err)
+		return fmt.Errorf("open database: %w", err)
 	}
 	defer func() {
 		if err := db.Close(); err != nil {
@@ -539,13 +461,22 @@ func RunIndexMode(indexName, indexPath string, includeHidden bool, dbPath string
 		}
 	}()
 
-	// Run index
 	ctx := context.Background()
+
+	// In fresh mode, clear all existing data before indexing
+	if fresh {
+		if err := storage.ClearDatabase(ctx, db); err != nil {
+			return fmt.Errorf("clear database: %w", err)
+		}
+		logger.Infof("Database cleared (fresh mode)")
+	}
+
 	if err := runIndex(ctx, db, indexName, indexPath, includeHidden); err != nil {
-		logger.Fatalf("Index failed: %v", err)
+		return fmt.Errorf("run index: %w", err)
 	}
 
 	logger.Infof("Index complete, subprocess exiting")
+	return nil
 }
 
 // runIndex performs the actual indexing work

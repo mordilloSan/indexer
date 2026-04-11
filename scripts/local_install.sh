@@ -18,17 +18,6 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# Ensure Go is on PATH (sudo often drops user PATH)
-PATH="/usr/local/go/bin:$PATH"
-GO_BIN="${GO_BIN:-$(command -v go || true)}"
-if [ -z "$GO_BIN" ] && [ -x "/usr/local/go/bin/go" ]; then
-    GO_BIN="/usr/local/go/bin/go"
-fi
-if [ -z "$GO_BIN" ]; then
-    echo -e "${RED}Error: Go toolchain not found. Install Go or set GO_BIN to the go binary.${NC}"
-    exit 1
-fi
-
 # Stop/disable any existing services and socket to avoid conflicts during install
 if systemctl list-unit-files | grep -q '^indexer.service'; then
     echo -e "${YELLOW}Stopping existing indexer.service (if running)...${NC}"
@@ -44,17 +33,14 @@ if systemctl list-unit-files | grep -q '^indexer.socket'; then
     systemctl disable indexer.socket 2>/dev/null || true
 fi
 
-# Step 1: Build the binary
-echo -e "${YELLOW}[1/5]${NC} Building indexer binary..."
-if command -v make &>/dev/null; then
-    GO_BIN="$GO_BIN" make build
-else
-    BUILD_VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
-    BUILD_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || true)"
-    BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
-    LDFLAGS="-X github.com/mordilloSan/indexer/internal/version.Version=${BUILD_VERSION} -X github.com/mordilloSan/indexer/internal/version.Commit=${BUILD_COMMIT} -X github.com/mordilloSan/indexer/internal/version.Date=${BUILD_DATE}"
-    "$GO_BIN" build -ldflags "$LDFLAGS" -o indexer .
+# Step 1: Verify the prebuilt binary exists
+echo -e "${YELLOW}[1/5]${NC} Verifying prebuilt binary..."
+if [ ! -x "./indexer" ]; then
+    echo -e "${RED}Error: ./indexer not found or not executable.${NC}"
+    echo "Run 'make build-only' before 'make localinstall'."
+    exit 1
 fi
+echo -e "${GREEN}✓${NC} Prebuilt binary found"
 
 # Step 2: Install binary
 echo -e "${YELLOW}[2/5]${NC} Installing binary to /usr/local/bin..."

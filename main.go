@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/pprof"
 	"strings"
 	"syscall"
 	"time"
@@ -19,33 +20,60 @@ import (
 	"github.com/mordilloSan/indexer/internal/version"
 )
 
-func main() {
-	var (
-		indexMode     = flag.Bool("index-mode", false, "Internal: run index and exit (spawned by daemon)")
-		showVersion   = flag.Bool("version", false, "Print version and exit")
-		showStatus    = flag.Bool("status", false, "Query /status from a running daemon and exit")
-		indexPath     = flag.String("path", "", "Path to index (required)")
-		indexName     = flag.String("name", "", "Name for this index (defaults to sanitized path)")
-		includeHidden = flag.Bool("include-hidden", false, "Include hidden files and directories")
-		dbPath        = flag.String("db-path", "", "SQLite database path (overrides INDEXER_DB_PATH)")
-		socketPath    = flag.String("socket-path", "/var/run/indexer.sock", "Unix socket path")
-		listenAddr    = flag.String("listen", "", "Optional TCP address (e.g., :8080)")
-		indexInterval = flag.String("interval", "1h", "Auto-index interval (Go duration like 6h, 30m); 0 disables")
-		verbose       = flag.Bool("verbose", false, "Enable verbose logging")
-	)
-	flag.Parse()
+const usageText = `Usage: indexer <command> [flags]
 
-	if *showVersion {
-		fmt.Println(version.String())
+Commands:
+  daemon    Start the indexer daemon
+  status    Query status from a running daemon
+  config    Show configuration of a running daemon
+  version   Print version information
+
+Run 'indexer <command> --help' for details on a specific command.
+`
+
+func main() {
+	// Internal: handle --index-mode for subprocess spawning (not shown in help)
+	if len(os.Args) > 1 && os.Args[1] == "--index-mode" {
+		runInternalIndexMode(os.Args[2:])
 		return
 	}
 
-	if *showStatus {
-		if err := printStatus(*socketPath, *listenAddr); err != nil {
-			fmt.Fprintln(os.Stderr, err.Error())
-			os.Exit(1)
-		}
-		return
+	if len(os.Args) < 2 {
+		fmt.Fprint(os.Stderr, usageText)
+		os.Exit(1)
+	}
+
+	switch os.Args[1] {
+	case "daemon":
+		runDaemon(os.Args[2:])
+	case "status":
+		runStatus(os.Args[2:])
+	case "config":
+		runConfig(os.Args[2:])
+	case "version":
+		fmt.Println(version.String())
+	case "--help", "-h", "help":
+		fmt.Print(usageText)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", os.Args[1])
+		fmt.Fprint(os.Stderr, usageText)
+		os.Exit(1)
+	}
+}
+
+func runDaemon(args []string) {
+	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
+	indexPath := fs.String("path", "", "Path to index (required)")
+	indexName := fs.String("name", "", "Name for this index (defaults to sanitized path)")
+	includeHidden := fs.Bool("include-hidden", false, "Include hidden files and directories")
+	freshIndex := fs.Bool("fresh", true, "Clear database before each full index (no previous results kept)")
+	dbPath := fs.String("db-path", "", "SQLite database path (overrides INDEXER_DB_PATH)")
+	socketPath := fs.String("socket-path", "/var/run/indexer.sock", "Unix socket path (\"-\" to disable)")
+	listenAddr := fs.String("listen", "", "Optional TCP address (e.g., :8080)")
+	indexInterval := fs.String("interval", "1h", "Auto-index interval (Go duration like 6h, 30m); 0 disables")
+	verbose := fs.Bool("verbose", false, "Enable verbose logging")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
 	}
 
 	levels := []logger.Level{logger.InfoLevel, logger.WarnLevel, logger.ErrorLevel, logger.FatalLevel}
@@ -53,28 +81,18 @@ func main() {
 		levels = logger.AllLevels()
 	}
 	logger.Init(logger.Config{Levels: levels})
-	mode := "daemon"
-	if *indexMode {
-		mode = "index"
-	}
-	logger.Infof("%s starting mode=%s", version.String(), mode)
+	logger.Infof("%s starting mode=daemon", version.String())
 
 	if *indexPath == "" {
-		logger.Errorf("Error: -path flag is required")
-		flag.Usage()
+		logger.Errorf("Error: --path flag is required")
+		fs.Usage()
 		os.Exit(1)
 	}
 
 	nameVal := sanitizeName(*indexName, *indexPath)
 	dbVal := coalesce(*dbPath, os.Getenv("INDEXER_DB_PATH"), "/tmp/indexer.db")
+	freshVal := *freshIndex || os.Getenv("INDEXER_FRESH") == "true"
 
-	// If running in index mode, do index and exit
-	if *indexMode {
-		cmd.RunIndexMode(nameVal, *indexPath, *includeHidden, dbVal, *verbose)
-		return
-	}
-
-	// Otherwise, run daemon normally
 	socketVal := coalesce(*socketPath, "/var/run/indexer.sock")
 	if *socketPath == "-" {
 		socketVal = "-"
@@ -91,6 +109,7 @@ func main() {
 		IndexName:     nameVal,
 		IndexPath:     *indexPath,
 		IncludeHidden: *includeHidden,
+		FreshIndex:    freshVal,
 		DBPath:        dbVal,
 		SocketPath:    socketVal,
 		ListenAddr:    listenVal,
@@ -121,22 +140,19 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Listen for interrupt signals
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 
-	// Run daemon in goroutine
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- d.Run(ctx)
 	}()
 
-	// Wait for shutdown signal or error
 	select {
 	case sig := <-sigCh:
 		logger.Infof("Received signal %v, initiating graceful shutdown...", sig)
-		cancel() // Trigger context cancellation
-		<-errCh  // Wait for daemon to finish
+		cancel()
+		<-errCh
 	case err := <-errCh:
 		if err != nil {
 			logger.Fatalf("Daemon exited with error: %v", err)
@@ -144,6 +160,160 @@ func main() {
 	}
 
 	logger.Infof("Shutdown complete")
+}
+
+func runStatus(args []string) {
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	socketPath := fs.String("socket-path", "/var/run/indexer.sock", "Unix socket path")
+	listenAddr := fs.String("listen", "", "TCP address of the daemon (e.g., :8080)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	if err := queryDaemon(*socketPath, *listenAddr, "/status"); err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+}
+
+func runConfig(args []string) {
+	fs := flag.NewFlagSet("config", flag.ExitOnError)
+	socketPath := fs.String("socket-path", "/var/run/indexer.sock", "Unix socket path")
+	listenAddr := fs.String("listen", "", "TCP address of the daemon (e.g., :8080)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	if err := queryDaemon(*socketPath, *listenAddr, "/config"); err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+}
+
+func runInternalIndexMode(args []string) {
+	fs := flag.NewFlagSet("index-mode", flag.ExitOnError)
+	indexPath := fs.String("path", "", "Path to index")
+	indexName := fs.String("name", "", "Index name")
+	includeHidden := fs.Bool("include-hidden", false, "Include hidden files")
+	freshIndex := fs.Bool("fresh", true, "Fresh index mode")
+	dbPath := fs.String("db-path", "", "SQLite database path")
+	cpuProfile := fs.String("cpu-profile", "", "Write CPU profile to file")
+	verbose := fs.Bool("verbose", false, "Enable verbose logging")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	levels := []logger.Level{logger.InfoLevel, logger.WarnLevel, logger.ErrorLevel, logger.FatalLevel}
+	if *verbose {
+		levels = logger.AllLevels()
+	}
+	logger.Init(logger.Config{Levels: levels})
+	logger.Infof("%s starting mode=index", version.String())
+
+	if *indexPath == "" {
+		logger.Errorf("Error: --path flag is required")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	nameVal := sanitizeName(*indexName, *indexPath)
+	dbVal := coalesce(*dbPath, os.Getenv("INDEXER_DB_PATH"), "/tmp/indexer.db")
+	freshVal := *freshIndex || os.Getenv("INDEXER_FRESH") == "true"
+
+	if err := withCPUProfile(*cpuProfile, func() error {
+		return cmd.RunIndexMode(nameVal, *indexPath, *includeHidden, freshVal, dbVal, *verbose)
+	}); err != nil {
+		logger.Fatalf("Index failed: %v", err)
+	}
+}
+
+func withCPUProfile(path string, run func() error) error {
+	if path == "" {
+		return run()
+	}
+
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create cpu profile %s: %w", path, err)
+	}
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close cpu profile: %v\n", closeErr)
+		}
+	}()
+
+	if err := pprof.StartCPUProfile(f); err != nil {
+		return fmt.Errorf("start cpu profile: %w", err)
+	}
+	defer pprof.StopCPUProfile()
+
+	logger.Infof("CPU profiling enabled: %s", path)
+	return run()
+}
+
+// queryDaemon sends a GET request to the given endpoint on the running daemon and prints the response.
+func queryDaemon(socketPath, listenAddr, endpoint string) error {
+	client, url, err := buildClient(socketPath, listenAddr, endpoint)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request %s: %w", url, err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close response body: %v\n", closeErr)
+		}
+	}()
+
+	body, err := ioReadAllLimit(resp.Body, 2<<20)
+	if err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	fmt.Println(strings.TrimSpace(string(body)))
+	return nil
+}
+
+// buildClient returns an HTTP client and URL for reaching the daemon at the given endpoint.
+func buildClient(socketPath, listenAddr, endpoint string) (*http.Client, string, error) {
+	timeout := 5 * time.Second
+
+	if listenAddr != "" {
+		base := listenAddr
+		if strings.HasPrefix(base, "http://") || strings.HasPrefix(base, "https://") {
+			return &http.Client{Timeout: timeout}, strings.TrimRight(base, "/") + endpoint, nil
+		}
+		if strings.HasPrefix(base, ":") {
+			base = "127.0.0.1" + base
+		}
+		return &http.Client{Timeout: timeout}, "http://" + strings.TrimRight(base, "/") + endpoint, nil
+	}
+
+	if socketPath == "-" {
+		return nil, "", fmt.Errorf("requires either --listen or a unix socket (got --socket-path '-')")
+	}
+	if socketPath == "" {
+		socketPath = "/var/run/indexer.sock"
+	}
+
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", socketPath)
+		},
+	}
+	return &http.Client{Transport: tr, Timeout: timeout}, "http://unix" + endpoint, nil
 }
 
 func sanitizeName(name, path string) string {
@@ -171,65 +341,6 @@ func parseInterval(s string) (time.Duration, error) {
 		return 0, nil
 	}
 	return time.ParseDuration(s)
-}
-
-func printStatus(socketPath, listenAddr string) error {
-	client, url, err := statusClientAndURL(socketPath, listenAddr)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("request %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-
-	body, err := ioReadAllLimit(resp.Body, 2<<20)
-	if err != nil {
-		return fmt.Errorf("read response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-
-	fmt.Println(strings.TrimSpace(string(body)))
-	return nil
-}
-
-func statusClientAndURL(socketPath, listenAddr string) (*http.Client, string, error) {
-	timeout := 5 * time.Second
-
-	if listenAddr != "" {
-		base := listenAddr
-		if strings.HasPrefix(base, "http://") || strings.HasPrefix(base, "https://") {
-			return &http.Client{Timeout: timeout}, strings.TrimRight(base, "/") + "/status", nil
-		}
-		if strings.HasPrefix(base, ":") {
-			base = "127.0.0.1" + base
-		}
-		return &http.Client{Timeout: timeout}, "http://" + strings.TrimRight(base, "/") + "/status", nil
-	}
-
-	if socketPath == "-" {
-		return nil, "", fmt.Errorf("status requires either --listen or a unix socket (got --socket-path '-')")
-	}
-	if socketPath == "" {
-		socketPath = "/var/run/indexer.sock"
-	}
-
-	tr := &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", socketPath)
-		},
-	}
-	return &http.Client{Transport: tr, Timeout: timeout}, "http://unix/status", nil
 }
 
 func ioReadAllLimit(r io.Reader, limit int64) ([]byte, error) {

@@ -35,8 +35,8 @@ jobs:
           VERSION="dev-${GITHUB_SHA::7}"
           COMMIT="${GITHUB_SHA::7}"
           DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          LDFLAGS="-X github.com/mordilloSan/indexer/internal/version.Version=${VERSION} -X github.com/mordilloSan/indexer/internal/version.Commit=${COMMIT} -X github.com/mordilloSan/indexer/internal/version.Date=${DATE}"
-          CGO_ENABLED=1 go build -trimpath -ldflags "$LDFLAGS" -o dist/indexer-linux-amd64 .
+          LDFLAGS="-s -w -X github.com/mordilloSan/indexer/internal/version.Version=${VERSION} -X github.com/mordilloSan/indexer/internal/version.Commit=${COMMIT} -X github.com/mordilloSan/indexer/internal/version.Date=${DATE}"
+          CGO_ENABLED=1 GOAMD64=v3 go build -trimpath -buildvcs=false -ldflags "$LDFLAGS" -o dist/indexer-linux-amd64 .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -53,9 +53,8 @@ fi
 arch_raw="$(uname -m)"
 case "$arch_raw" in
   x86_64|amd64) arch="amd64" ;;
-  aarch64|arm64) arch="arm64" ;;
   *)
-    echo -e "${RED}Error: unsupported architecture '$arch_raw'. Supported: x86_64/amd64, aarch64/arm64.${NC}"
+    echo -e "${RED}Error: unsupported architecture '$arch_raw'. Supported: x86_64/amd64 only.${NC}"
     exit 1
     ;;
 esac
