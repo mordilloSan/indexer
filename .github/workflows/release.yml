@@ -53,9 +53,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential \
-            libc6-dev \
-            gcc-aarch64-linux-gnu \
-            libc6-dev-arm64-cross
+            libc6-dev
 
       - name: Build binaries
         run: |
@@ -65,12 +63,9 @@ jobs:
           COMMIT="$(git rev-parse --short HEAD)"
           DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           LDFLAGS="-s -w -X github.com/mordilloSan/indexer/internal/version.Version=${VERSION} -X github.com/mordilloSan/indexer/internal/version.Commit=${COMMIT} -X github.com/mordilloSan/indexer/internal/version.Date=${DATE}"
-          for arch in amd64 arm64; do
-            echo "Building linux/$arch..."
-            CC="gcc"
-            if [ "$arch" = "arm64" ]; then CC="aarch64-linux-gnu-gcc"; fi
-            GOOS=linux GOARCH="$arch" CGO_ENABLED=1 CC="$CC" go build -trimpath -ldflags "$LDFLAGS" -o "dist/indexer-linux-${arch}" .
-          done
+          echo "Building linux/amd64..."
+          GOOS=linux GOARCH=amd64 GOAMD64=v3 CGO_ENABLED=1 CC=gcc \
+            go build -trimpath -buildvcs=false -ldflags "$LDFLAGS" -o "dist/indexer-linux-amd64" .
 
       - name: Package install assets
         run: |
@@ -92,7 +87,6 @@ jobs:
           tag_name: ${{ steps.tag.outputs.tag }}
           files: |
             dist/indexer-linux-amd64
-            dist/indexer-linux-arm64
             dist/indexer.service
             dist/indexer.socket
             dist/indexer-install.sh

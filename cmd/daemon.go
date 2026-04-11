@@ -447,13 +447,13 @@ func (d *daemon) runIndexSubprocess(ctx context.Context) error {
 }
 
 // RunIndexMode is called from main when -index-mode flag is set.
-// It performs the index and exits (releasing all memory including leaks).
-func RunIndexMode(indexName, indexPath string, includeHidden, fresh bool, dbPath string, verbose bool) {
+// It performs the index and returns when complete.
+func RunIndexMode(indexName, indexPath string, includeHidden, fresh bool, dbPath string, verbose bool) error {
 	logger.Infof("Running in index mode: path=%s name=%s db=%s fresh=%t", indexPath, indexName, dbPath, fresh)
 
 	db, _, err := openDatabaseWithIntegrityCheck(dbPath)
 	if err != nil {
-		logger.Fatalf("Failed to open database: %v", err)
+		return fmt.Errorf("open database: %w", err)
 	}
 	defer func() {
 		if err := db.Close(); err != nil {
@@ -466,16 +466,17 @@ func RunIndexMode(indexName, indexPath string, includeHidden, fresh bool, dbPath
 	// In fresh mode, clear all existing data before indexing
 	if fresh {
 		if err := storage.ClearDatabase(ctx, db); err != nil {
-			logger.Fatalf("Failed to clear database: %v", err)
+			return fmt.Errorf("clear database: %w", err)
 		}
 		logger.Infof("Database cleared (fresh mode)")
 	}
 
 	if err := runIndex(ctx, db, indexName, indexPath, includeHidden); err != nil {
-		logger.Fatalf("Index failed: %v", err)
+		return fmt.Errorf("run index: %w", err)
 	}
 
 	logger.Infof("Index complete, subprocess exiting")
+	return nil
 }
 
 // runIndex performs the actual indexing work

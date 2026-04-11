@@ -6,12 +6,14 @@ BACKEND_DIR ?= $(CURDIR)
 BINARY_NAME ?= indexer
 BINARY := $(CURDIR)/$(BINARY_NAME)
 CACHE_ROOT := $(CURDIR)/.cache
-export GOCACHE := $(CACHE_ROOT)/go-build
 export GOMODCACHE := $(CACHE_ROOT)/gomod
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "")
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
 LDFLAGS ?= -X github.com/mordilloSan/indexer/internal/version.Version=$(VERSION) -X github.com/mordilloSan/indexer/internal/version.Commit=$(GIT_COMMIT) -X github.com/mordilloSan/indexer/internal/version.Date=$(BUILD_DATE)
+GOAMD64 ?= v3
+GO_BUILD_FLAGS ?= -trimpath -buildvcs=false
+GO_LDSTRIP ?= -s -w
 GOLANGCI_LINT_MODULE  := github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 GOLANGCI_LINT_VERSION ?= latest
 GOLANGCI_LINT         := $(GO_INSTALL_DIR)/bin/golangci-lint
@@ -26,7 +28,7 @@ GOCYCLO_MAX_COMPLEXITY ?= 20
 .ONESHELL:
 SHELL := /bin/bash
 
-.PHONY: ensure-golint ensure-modernize ensure-gocyclo modernize golint golint-only run run-verbose build build-only test benchmark index status localinstall
+.PHONY: ensure-golint ensure-modernize ensure-gocyclo modernize golint golint-only run run-verbose build build-only test benchmark pgo compare-pgo index status localinstall
 
 ensure-golint:
 	@{ set -euo pipefail; \
@@ -123,7 +125,9 @@ build: golint test build-only
 build-only:
 	@set -euo pipefail
 	@echo "Building indexer binary at $(BINARY)"
-	@( cd "$(BACKEND_DIR)" && $(GO_BIN) build -ldflags "$(LDFLAGS)" -o "$(BINARY)" . )
+	@( cd "$(BACKEND_DIR)" && \
+	   GOAMD64="$(GOAMD64)" \
+	   $(GO_BIN) build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDSTRIP) $(LDFLAGS)" -o "$(BINARY)" . )
 	@size="$$(stat -c '%s' "$(BINARY)")"; \
 	 human="$$(ls -lh "$(BINARY)" | awk '{print $$5}')"; \
 	 echo "Binary size: $$size bytes ($$human)"
@@ -148,6 +152,16 @@ test:
 benchmark:
 	@set -euo pipefail
 	@( ./scripts/benchmark.sh )
+
+pgo:
+	@set -euo pipefail
+	@if [ "$${PGO_USE_SUDO:-$${PGO_MODE:-real}}" != "synthetic" ]; then sudo -v; fi
+	@( ./scripts/generate_pgo.sh )
+
+compare-pgo:
+	@set -euo pipefail
+	@if [ "$${COMPARE_PGO_USE_SUDO:-true}" = "true" ]; then sudo -v; fi
+	@( ./scripts/compare_pgo.sh )
 
 localinstall: build-only
 	@set -euo pipefail

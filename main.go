@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/pprof"
 	"strings"
 	"syscall"
 	"time"
@@ -196,6 +197,7 @@ func runInternalIndexMode(args []string) {
 	includeHidden := fs.Bool("include-hidden", false, "Include hidden files")
 	freshIndex := fs.Bool("fresh", true, "Fresh index mode")
 	dbPath := fs.String("db-path", "", "SQLite database path")
+	cpuProfile := fs.String("cpu-profile", "", "Write CPU profile to file")
 	verbose := fs.Bool("verbose", false, "Enable verbose logging")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
@@ -218,7 +220,35 @@ func runInternalIndexMode(args []string) {
 	dbVal := coalesce(*dbPath, os.Getenv("INDEXER_DB_PATH"), "/tmp/indexer.db")
 	freshVal := *freshIndex || os.Getenv("INDEXER_FRESH") == "true"
 
-	cmd.RunIndexMode(nameVal, *indexPath, *includeHidden, freshVal, dbVal, *verbose)
+	if err := withCPUProfile(*cpuProfile, func() error {
+		return cmd.RunIndexMode(nameVal, *indexPath, *includeHidden, freshVal, dbVal, *verbose)
+	}); err != nil {
+		logger.Fatalf("Index failed: %v", err)
+	}
+}
+
+func withCPUProfile(path string, run func() error) error {
+	if path == "" {
+		return run()
+	}
+
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create cpu profile %s: %w", path, err)
+	}
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close cpu profile: %v\n", closeErr)
+		}
+	}()
+
+	if err := pprof.StartCPUProfile(f); err != nil {
+		return fmt.Errorf("start cpu profile: %w", err)
+	}
+	defer pprof.StopCPUProfile()
+
+	logger.Infof("CPU profiling enabled: %s", path)
+	return run()
 }
 
 // queryDaemon sends a GET request to the given endpoint on the running daemon and prints the response.
