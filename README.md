@@ -369,7 +369,9 @@ Indexes: `idx_entries_index_id` on `index_id`, and `idx_entries_path` unique on 
 
 ## Development
 
-- Build: `make build` (or `go build -o indexer .`)
+- Build: `make build`
+- Compile only: `make build-only` (or `go build -o indexer .`)
+- Local install: `make localinstall`
 - Tests: `make test`
 - Lint: `make golint`
 - Benchmarks: `make benchmark`

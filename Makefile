@@ -26,7 +26,7 @@ GOCYCLO_MAX_COMPLEXITY ?= 20
 .ONESHELL:
 SHELL := /bin/bash
 
-.PHONY: ensure-golint ensure-modernize ensure-gocyclo modernize golint golint-only run run-verbose build test benchmark index status
+.PHONY: ensure-golint ensure-modernize ensure-gocyclo modernize golint golint-only run run-verbose build build-only test benchmark index status localinstall
 
 ensure-golint:
 	@{ set -euo pipefail; \
@@ -103,8 +103,8 @@ endif
 	   if [ "$${#files[@]}" -gt 0 ]; then "$(GOCYCLO)" -over "$(GOCYCLO_MAX_COMPLEXITY)" "$${files[@]}"; fi )
 	@echo "Go Linting complete!"
 
-run: build
-	@"$(BINARY)" \
+run: build-only
+	@"$(BINARY)" daemon \
 		--path "/" \
 		--name "root" \
 		--include-hidden \
@@ -116,9 +116,11 @@ run: build
 run-verbose:
 	@set -euo pipefail
 	@echo "Running indexer from $(BACKEND_DIR) against / (verbose)"
-	@( cd "$(BACKEND_DIR)" && $(GO_BIN) run . -path / -verbose -include-hidden )
+	@( cd "$(BACKEND_DIR)" && $(GO_BIN) run . daemon -path / -verbose -include-hidden )
 
-build:
+build: golint test build-only
+
+build-only:
 	@set -euo pipefail
 	@echo "Building indexer binary at $(BINARY)"
 	@( cd "$(BACKEND_DIR)" && $(GO_BIN) build -ldflags "$(LDFLAGS)" -o "$(BINARY)" . )
@@ -146,6 +148,10 @@ test:
 benchmark:
 	@set -euo pipefail
 	@( ./scripts/benchmark.sh )
+
+localinstall: build-only
+	@set -euo pipefail
+	@sudo ./scripts/local_install.sh
 
 index:
 	@set -euo pipefail

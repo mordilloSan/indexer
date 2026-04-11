@@ -575,6 +575,29 @@ func (d *daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
+func (d *daemon) handleConfig(w http.ResponseWriter, r *http.Request) {
+	resp := struct {
+		IndexName     string `json:"index_name"`
+		IndexPath     string `json:"index_path"`
+		IncludeHidden bool   `json:"include_hidden"`
+		FreshIndex    bool   `json:"fresh_index"`
+		DBPath        string `json:"db_path"`
+		SocketPath    string `json:"socket_path"`
+		ListenAddr    string `json:"listen_addr"`
+		Interval      string `json:"interval"`
+	}{
+		IndexName:     d.cfg.IndexName,
+		IndexPath:     d.cfg.IndexPath,
+		IncludeHidden: d.cfg.IncludeHidden,
+		FreshIndex:    d.cfg.FreshIndex,
+		DBPath:        d.cfg.DBPath,
+		SocketPath:    d.cfg.SocketPath,
+		ListenAddr:    d.cfg.ListenAddr,
+		Interval:      d.cfg.Interval.String(),
+	}
+	writeJSON(w, resp)
+}
+
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(v); err != nil {
@@ -628,6 +651,7 @@ const openapiSpec = `{
     "/dirsize": { "get": { "summary": "Directory size", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"} }], "responses": { "200": {"description": "Size"} } } },
     "/entries": { "get": { "summary": "List entries (returns type: folder/file)", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"} }, { "in": "query", "name": "recursive", "schema": {"type": "boolean"} }, { "in": "query", "name": "limit", "schema": {"type": "integer"} }, { "in": "query", "name": "offset", "schema": {"type": "integer"} }], "responses": { "200": {"description": "Entries with type field indicating folder or file"} } } },
     "/add": { "post": { "summary": "Upsert entry", "responses": { "200": {"description": "OK"} } } },
-    "/delete": { "delete": { "summary": "Delete entry", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"} }], "responses": { "200": {"description": "OK"} } } }
+    "/delete": { "delete": { "summary": "Delete entry", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"} }], "responses": { "200": {"description": "OK"} } } },
+    "/config": { "get": { "summary": "Get daemon configuration", "responses": { "200": {"description": "Configuration JSON"} } } }
   }
 }`

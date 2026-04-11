@@ -90,95 +90,131 @@ func waitForCondition(t *testing.T, timeout time.Duration, condition func() bool
 }
 
 func TestWorkStreamBroadcasterFanout(t *testing.T) {
-	broadcaster := newWorkStreamBroadcaster("reindex", "/docs")
+	t.Run("metadata", func(t *testing.T) {
+		b := newWorkStreamBroadcaster("reindex", "/docs")
+		defer b.close()
 
-	if got := broadcaster.Operation(); got != "reindex" {
-		t.Fatalf("operation = %q, want %q", got, "reindex")
-	}
-	if got := broadcaster.Path(); got != "/docs" {
-		t.Fatalf("path = %q, want %q", got, "/docs")
-	}
-
-	id1, ch1, err := broadcaster.subscribe()
-	if err != nil {
-		t.Fatalf("subscribe #1: %v", err)
-	}
-
-	_, ch2, err := broadcaster.subscribe()
-	if err != nil {
-		t.Fatalf("subscribe #2: %v", err)
-	}
-
-	if got := broadcaster.subscriberCount(); got != 2 {
-		t.Fatalf("subscriber count = %d, want 2", got)
-	}
-
-	if err := broadcaster.SendEvent("progress", WorkProgressEvent{Operation: "reindex", FilesIndexed: 10}); err != nil {
-		t.Fatalf("broadcast progress: %v", err)
-	}
-
-	evt1 := mustReceiveWorkEvent(t, ch1)
-	evt2 := mustReceiveWorkEvent(t, ch2)
-	if evt1.event != "progress" || evt2.event != "progress" {
-		t.Fatalf("unexpected event names: %q and %q", evt1.event, evt2.event)
-	}
-
-	p1, ok := evt1.data.(WorkProgressEvent)
-	if !ok {
-		t.Fatalf("event #1 data type = %T, want WorkProgressEvent", evt1.data)
-	}
-	if p1.FilesIndexed != 10 {
-		t.Fatalf("files_indexed = %d, want 10", p1.FilesIndexed)
-	}
-
-	broadcaster.unsubscribe(id1)
-	select {
-	case _, ok := <-ch1:
-		if ok {
-			t.Fatal("subscriber #1 channel should be closed")
+		if got := b.Operation(); got != "reindex" {
+			t.Fatalf("operation = %q, want %q", got, "reindex")
 		}
-	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for subscriber #1 close")
-	}
-
-	if got := broadcaster.subscriberCount(); got != 1 {
-		t.Fatalf("subscriber count after unsubscribe = %d, want 1", got)
-	}
-
-	if err := broadcaster.SendError("boom"); err != nil {
-		t.Fatalf("broadcast error: %v", err)
-	}
-
-	evt2 = mustReceiveWorkEvent(t, ch2)
-	if evt2.event != "error" {
-		t.Fatalf("event name = %q, want %q", evt2.event, "error")
-	}
-
-	errorData, ok := evt2.data.(map[string]string)
-	if !ok {
-		t.Fatalf("error payload type = %T, want map[string]string", evt2.data)
-	}
-	if got := errorData["message"]; got != "boom" {
-		t.Fatalf("error message = %q, want %q", got, "boom")
-	}
-
-	broadcaster.close()
-	select {
-	case _, ok := <-ch2:
-		if ok {
-			t.Fatal("subscriber #2 channel should be closed after broadcaster close")
+		if got := b.Path(); got != "/docs" {
+			t.Fatalf("path = %q, want %q", got, "/docs")
 		}
-	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for subscriber #2 close")
-	}
+	})
 
-	if got := broadcaster.subscriberCount(); got != 0 {
-		t.Fatalf("subscriber count after close = %d, want 0", got)
-	}
+	t.Run("fanout_to_subscribers", func(t *testing.T) {
+		b := newWorkStreamBroadcaster("reindex", "/docs")
+		defer b.close()
 
-	if err := broadcaster.SendEvent("progress", WorkProgressEvent{}); err == nil {
-		t.Fatal("expected send error after broadcaster close")
-	}
+		_, ch1, err := b.subscribe()
+		if err != nil {
+			t.Fatalf("subscribe #1: %v", err)
+		}
+		_, ch2, err := b.subscribe()
+		if err != nil {
+			t.Fatalf("subscribe #2: %v", err)
+		}
+		if got := b.subscriberCount(); got != 2 {
+			t.Fatalf("subscriber count = %d, want 2", got)
+		}
+
+		if err := b.SendEvent("progress", WorkProgressEvent{Operation: "reindex", FilesIndexed: 10}); err != nil {
+			t.Fatalf("broadcast progress: %v", err)
+		}
+
+		evt1 := mustReceiveWorkEvent(t, ch1)
+		evt2 := mustReceiveWorkEvent(t, ch2)
+		if evt1.event != "progress" || evt2.event != "progress" {
+			t.Fatalf("unexpected event names: %q and %q", evt1.event, evt2.event)
+		}
+
+		p1, ok := evt1.data.(WorkProgressEvent)
+		if !ok {
+			t.Fatalf("event #1 data type = %T, want WorkProgressEvent", evt1.data)
+		}
+		if p1.FilesIndexed != 10 {
+			t.Fatalf("files_indexed = %d, want 10", p1.FilesIndexed)
+		}
+	})
+
+	t.Run("unsubscribe", func(t *testing.T) {
+		b := newWorkStreamBroadcaster("reindex", "/docs")
+		defer b.close()
+
+		id1, ch1, err := b.subscribe()
+		if err != nil {
+			t.Fatalf("subscribe: %v", err)
+		}
+		if _, _, err := b.subscribe(); err != nil {
+			t.Fatalf("subscribe #2: %v", err)
+		}
+
+		b.unsubscribe(id1)
+		select {
+		case _, ok := <-ch1:
+			if ok {
+				t.Fatal("channel should be closed after unsubscribe")
+			}
+		case <-time.After(1 * time.Second):
+			t.Fatal("timed out waiting for channel close")
+		}
+
+		if got := b.subscriberCount(); got != 1 {
+			t.Fatalf("subscriber count after unsubscribe = %d, want 1", got)
+		}
+	})
+
+	t.Run("send_error", func(t *testing.T) {
+		b := newWorkStreamBroadcaster("reindex", "/docs")
+		defer b.close()
+
+		_, ch, err := b.subscribe()
+		if err != nil {
+			t.Fatalf("subscribe: %v", err)
+		}
+
+		if err := b.SendError("boom"); err != nil {
+			t.Fatalf("broadcast error: %v", err)
+		}
+
+		evt := mustReceiveWorkEvent(t, ch)
+		if evt.event != "error" {
+			t.Fatalf("event name = %q, want %q", evt.event, "error")
+		}
+		errorData, ok := evt.data.(map[string]string)
+		if !ok {
+			t.Fatalf("error payload type = %T, want map[string]string", evt.data)
+		}
+		if got := errorData["message"]; got != "boom" {
+			t.Fatalf("error message = %q, want %q", got, "boom")
+		}
+	})
+
+	t.Run("close_broadcaster", func(t *testing.T) {
+		b := newWorkStreamBroadcaster("reindex", "/docs")
+
+		_, ch, err := b.subscribe()
+		if err != nil {
+			t.Fatalf("subscribe: %v", err)
+		}
+
+		b.close()
+		select {
+		case _, ok := <-ch:
+			if ok {
+				t.Fatal("channel should be closed after broadcaster close")
+			}
+		case <-time.After(1 * time.Second):
+			t.Fatal("timed out waiting for channel close")
+		}
+
+		if got := b.subscriberCount(); got != 0 {
+			t.Fatalf("subscriber count after close = %d, want 0", got)
+		}
+		if err := b.SendEvent("progress", WorkProgressEvent{}); err == nil {
+			t.Fatal("expected send error after broadcaster close")
+		}
+	})
 }
 
 func TestHandleStatusStreamFallsBackToJSONWhenIdle(t *testing.T) {

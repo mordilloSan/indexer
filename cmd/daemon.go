@@ -287,6 +287,7 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 	mux.HandleFunc("/add", d.handleAdd)
 	mux.HandleFunc("/delete", d.handleDelete)
 	mux.HandleFunc("/entries", d.handleEntries)
+	mux.HandleFunc("/config", d.handleConfig)
 
 	errCh := make(chan error, 2)
 	serverCount := 0

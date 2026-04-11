@@ -47,7 +47,7 @@ fi
 # Step 1: Build the binary
 echo -e "${YELLOW}[1/5]${NC} Building indexer binary..."
 if command -v make &>/dev/null; then
-    GO_BIN="$GO_BIN" make build
+    GO_BIN="$GO_BIN" make build-only
 else
     BUILD_VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
     BUILD_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || true)"
