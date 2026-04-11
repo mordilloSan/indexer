@@ -27,6 +27,7 @@ func main() {
 		indexPath     = flag.String("path", "", "Path to index (required)")
 		indexName     = flag.String("name", "", "Name for this index (defaults to sanitized path)")
 		includeHidden = flag.Bool("include-hidden", false, "Include hidden files and directories")
+		freshIndex    = flag.Bool("fresh", true, "Clear database before each full index (no previous results kept)")
 		dbPath        = flag.String("db-path", "", "SQLite database path (overrides INDEXER_DB_PATH)")
 		socketPath    = flag.String("socket-path", "/var/run/indexer.sock", "Unix socket path")
 		listenAddr    = flag.String("listen", "", "Optional TCP address (e.g., :8080)")
@@ -67,10 +68,11 @@ func main() {
 
 	nameVal := sanitizeName(*indexName, *indexPath)
 	dbVal := coalesce(*dbPath, os.Getenv("INDEXER_DB_PATH"), "/tmp/indexer.db")
+	freshVal := *freshIndex || os.Getenv("INDEXER_FRESH") == "true"
 
 	// If running in index mode, do index and exit
 	if *indexMode {
-		cmd.RunIndexMode(nameVal, *indexPath, *includeHidden, dbVal, *verbose)
+		cmd.RunIndexMode(nameVal, *indexPath, *includeHidden, freshVal, dbVal, *verbose)
 		return
 	}
 
@@ -91,6 +93,7 @@ func main() {
 		IndexName:     nameVal,
 		IndexPath:     *indexPath,
 		IncludeHidden: *includeHidden,
+		FreshIndex:    freshVal,
 		DBPath:        dbVal,
 		SocketPath:    socketVal,
 		ListenAddr:    listenVal,
@@ -188,7 +191,11 @@ func printStatus(socketPath, listenAddr string) error {
 	if err != nil {
 		return fmt.Errorf("request %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			logger.Warnf("Failed to close %s response body: %v", url, closeErr)
+		}
+	}()
 
 	body, err := ioReadAllLimit(resp.Body, 2<<20)
 	if err != nil {

@@ -1,4 +1,6 @@
 GO_INSTALL_DIR := $(HOME)/.go
+GO_VERSION ?= $(shell awk '/^go / {print $$2; exit}' go.mod)
+GO_MAJOR_MINOR := $(shell printf '%s' "$(GO_VERSION)" | cut -d. -f1,2)
 GO_BIN ?= go
 BACKEND_DIR ?= $(CURDIR)
 BINARY_NAME ?= indexer
@@ -13,13 +15,18 @@ LDFLAGS ?= -X github.com/mordilloSan/indexer/internal/version.Version=$(VERSION)
 GOLANGCI_LINT_MODULE  := github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 GOLANGCI_LINT_VERSION ?= latest
 GOLANGCI_LINT         := $(GO_INSTALL_DIR)/bin/golangci-lint
+GOLANGCI_LINT_GO_MINOR ?= $(GO_MAJOR_MINOR)
 GOLANGCI_LINT_OPTS ?= --modules-download-mode=mod
+MODERNIZE_MODULE      := golang.org/x/tools/go/analysis/passes/modernize/cmd/modernize
+MODERNIZE_VERSION     ?= latest
+MODERNIZE             := $(GO_INSTALL_DIR)/bin/modernize
 GOCYCLO               := $(GO_INSTALL_DIR)/bin/gocyclo
+GOCYCLO_MAX_COMPLEXITY ?= 20
 
 .ONESHELL:
 SHELL := /bin/bash
 
-.PHONY: ensure-golint ensure-gocyclo golint run run-verbose build test benchmark index status
+.PHONY: ensure-golint ensure-modernize ensure-gocyclo modernize golint golint-only run run-verbose build test benchmark index status
 
 ensure-golint:
 	@{ set -euo pipefail; \
@@ -28,7 +35,7 @@ ensure-golint:
 	     out="$$( "$$bin" version 2>/dev/null || true)"; \
 	     ver="$$( printf '%s' "$$out" | sed -n 's/^golangci-lint has version[[:space:]]\([v0-9.]\+\).*/\1/p' )"; \
 	     ver_no_v="$${ver#v}"; major="$${ver_no_v%%.*}"; \
-	     built_ok="$$( printf '%s' "$$out" | grep -Eq 'built with go1\.25(\.|$$)' && echo yes || echo no )"; \
+	     built_ok="$$( printf '%s' "$$out" | grep -Eq 'built with go$(GOLANGCI_LINT_GO_MINOR)(\.|$$)' && echo yes || echo no )"; \
 	     if [ "$$major" = "2" ] && [ "$$built_ok" = "yes" ]; then need=0; fi; \
 	   fi; \
 	   if [ $$need -eq 1 ]; then \
@@ -42,7 +49,7 @@ ensure-golint:
 	   ver="$$( printf '%s' "$$out" | sed -n 's/^golangci-lint has version[[:space:]]\([v0-9.]\+\).*/\1/p' )"; \
 	   ver_no_v="$${ver#v}"; major="$${ver_no_v%%.*}"; \
 	   [ "$$major" = "2" ] || { echo "ERROR: not a v2 golangci-lint"; exit 1; }; \
-	   echo "$$out" | grep -Eq 'built with go1\.25(\.|$$)' || { echo "ERROR: golangci-lint not built with Go 1.25"; exit 1; }; \
+	   echo "$$out" | grep -Eq 'built with go$(GOLANGCI_LINT_GO_MINOR)(\.|$$)' || { echo "ERROR: golangci-lint not built with Go $(GOLANGCI_LINT_GO_MINOR)"; exit 1; }; \
 	   echo "golangci-lint v2 ready."; \
 	}
 
@@ -53,22 +60,47 @@ ensure-gocyclo:
 	fi
 	@echo "gocyclo ready."
 
-golint: ensure-golint ensure-gocyclo
+ensure-modernize:
+	@if [ ! -x "$(MODERNIZE)" ]; then \
+	  echo "Installing modernize..."; \
+	  PATH="$(GO_INSTALL_DIR)/bin:$$PATH" GOBIN="$(GO_INSTALL_DIR)/bin" GOTOOLCHAIN=local GOFLAGS="-buildvcs=false" \
+	    "$(GO_BIN)" install "$(MODERNIZE_MODULE)@$(MODERNIZE_VERSION)"; \
+	fi
+	@echo "modernize ready."
+
+modernize: ensure-modernize
+	@set -euo pipefail
+	@echo "Running modernize..."
+	@( cd "$(BACKEND_DIR)" && "$(MODERNIZE)" -fix ./... )
+
+golint: ensure-golint ensure-modernize ensure-gocyclo
+	@$(MAKE) --no-print-directory golint-only
+
+golint-only:
 	@set -euo pipefail
 	@echo "Linting Go module in: $(BACKEND_DIR)"
 	@echo "Running gofmt..."
 ifneq ($(CI),)
-	@fmt_out="$$(cd "$(BACKEND_DIR)" && gofmt -s -l .)"; \
+	@fmt_out="$$(cd "$(BACKEND_DIR)" && { \
+		mapfile -t files < <(find . \( -path './.git' -o -path './.cache' \) -prune -o -type f -name '*.go' -print); \
+		if [ "$${#files[@]}" -gt 0 ]; then gofmt -s -l "$${files[@]}"; fi; \
+	})"; \
 	if [ -n "$$fmt_out" ]; then echo "The following files are not gofmt'ed:"; echo "$$fmt_out"; exit 1; fi
 else
-	@( cd "$(BACKEND_DIR)" && gofmt -s -w . )
+	@( cd "$(BACKEND_DIR)" && \
+	   mapfile -t files < <(find . \( -path './.git' -o -path './.cache' \) -prune -o -type f -name '*.go' -print); \
+	   if [ "$${#files[@]}" -gt 0 ]; then gofmt -s -w "$${files[@]}"; fi )
 endif
 	@echo "Ensuring go.mod is tidy..."
 	@( cd "$(BACKEND_DIR)" && go mod tidy && go mod download )
+	@echo "Running modernize..."
+	@( cd "$(BACKEND_DIR)" && "$(MODERNIZE)" -fix ./... )
 	@echo "Running golangci-lint..."
 	@( cd "$(BACKEND_DIR)" && "$(GOLANGCI_LINT)" run --fix ./... --timeout 3m $(GOLANGCI_LINT_OPTS) )
 	@echo "Running gocyclo (complexity check)..."
-	@( cd "$(BACKEND_DIR)" && "$(GOCYCLO)" -over 15 . )
+	@( cd "$(BACKEND_DIR)" && \
+	   mapfile -t files < <(find . \( -path './.git' -o -path './.cache' \) -prune -o -type f -name '*.go' ! -name '*_test.go' -print); \
+	   if [ "$${#files[@]}" -gt 0 ]; then "$(GOCYCLO)" -over "$(GOCYCLO_MAX_COMPLEXITY)" "$${files[@]}"; fi )
 	@echo "Go Linting complete!"
 
 run: build

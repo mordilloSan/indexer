@@ -122,3 +122,20 @@ func PruneOldIndexes(ctx context.Context, db *sql.DB, keepLatest int, maxAge tim
 
 	return stats, nil
 }
+
+// ClearDatabase removes all index records and entries from the database.
+// Used in fresh mode to ensure no previous results are kept before a new index.
+func ClearDatabase(ctx context.Context, db *sql.DB) error {
+	ctx = ensureContext(ctx)
+	if db == nil {
+		return fmt.Errorf("db is nil")
+	}
+
+	if _, err := db.ExecContext(ctx, `DELETE FROM entries;`); err != nil {
+		return fmt.Errorf("clear entries: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM indexes;`); err != nil {
+		return fmt.Errorf("clear indexes: %w", err)
+	}
+	return nil
+}
