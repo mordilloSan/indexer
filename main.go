@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -9,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime/pprof"
 	"strconv"
@@ -207,6 +210,10 @@ func runStatus(args []string) {
 }
 
 func runConfig(args []string) {
+	if len(args) > 0 && args[0] == "set" {
+		runConfigSet(args[1:])
+		return
+	}
 	fs := flag.NewFlagSet("config", flag.ExitOnError)
 	socketPath := fs.String("socket-path", "/var/run/indexer.sock", "Unix socket path")
 	listenAddr := fs.String("listen", "", "TCP address of the daemon (e.g., :8080)")
@@ -214,10 +221,158 @@ func runConfig(args []string) {
 		os.Exit(1)
 	}
 
-	if err := queryDaemon(*socketPath, *listenAddr, "/config"); err != nil {
+	if err := queryDaemonPretty(*socketPath, *listenAddr, "/config"); err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
 	}
+}
+
+func runConfigSet(args []string) {
+	const defaultEnvFile = "/etc/default/indexer"
+
+	fs := flag.NewFlagSet("config set", flag.ExitOnError)
+	envFile := fs.String("env-file", defaultEnvFile, "Environment file to update")
+	noRestart := fs.Bool("no-restart", false, "Skip service restart after updating")
+	service := fs.String("service", "indexer", "Systemd service name")
+
+	path := fs.String("path", "", "Path to index")
+	name := fs.String("name", "", "Index name")
+	includeHidden := fs.Bool("include-hidden", false, "Include hidden files")
+	includeNetworkMounts := fs.Bool("include-network-mounts", false, "Include network mounts")
+	fresh := fs.Bool("fresh", false, "Fresh index mode")
+	keepIndexes := fs.Int("keep-indexes", 0, "Records to keep after indexing (0=disabled)")
+	dbPath := fs.String("db-path", "", "SQLite database path")
+	interval := fs.String("interval", "", "Auto-index interval (e.g. 1h, 30m, 0)")
+	listen := fs.String("listen", "", "TCP listen address (e.g. :8080); empty to disable")
+
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	updates := collectEnvUpdates(fs, path, name, includeHidden, includeNetworkMounts, fresh, keepIndexes, dbPath, interval, listen)
+
+	if len(updates) == 0 {
+		fmt.Fprintln(os.Stderr, "no settings specified; use flags like --interval=2h or --path=/data")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	if v, ok := updates["INDEXER_INTERVAL"]; ok {
+		if _, err := parseInterval(v); err != nil {
+			fmt.Fprintf(os.Stderr, "invalid interval %q: %v\n", v, err)
+			os.Exit(1)
+		}
+	}
+
+	current, err := readEnvFile(*envFile)
+	if err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "read %s: %v\n", *envFile, err)
+		os.Exit(1)
+	}
+
+	for k, v := range updates {
+		current[k] = v
+		fmt.Printf("  %s=%s\n", k, v)
+	}
+
+	if err := writeEnvFile(*envFile, current); err != nil {
+		fmt.Fprintf(os.Stderr, "write %s: %v\n", *envFile, err)
+		os.Exit(1)
+	}
+	fmt.Printf("updated %s\n", *envFile)
+
+	if !*noRestart {
+		fmt.Printf("restarting %s...\n", *service)
+		out, err := exec.Command("systemctl", "restart", *service).CombinedOutput()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "restart failed: %v\n%s\n", err, strings.TrimSpace(string(out)))
+			os.Exit(1)
+		}
+		fmt.Println("done")
+	}
+}
+
+func collectEnvUpdates(fs *flag.FlagSet, path, name *string, includeHidden, includeNetworkMounts, fresh *bool, keepIndexes *int, dbPath, interval, listen *string) map[string]string {
+	updates := map[string]string{}
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "path":
+			updates["INDEXER_PATH"] = *path
+		case "name":
+			updates["INDEXER_NAME"] = *name
+		case "include-hidden":
+			updates["INDEXER_INCLUDE_HIDDEN"] = strconv.FormatBool(*includeHidden)
+		case "include-network-mounts":
+			updates["INDEXER_INCLUDE_NETWORK_MOUNTS"] = strconv.FormatBool(*includeNetworkMounts)
+		case "fresh":
+			updates["INDEXER_FRESH"] = strconv.FormatBool(*fresh)
+		case "keep-indexes":
+			updates["INDEXER_KEEP_INDEXES"] = strconv.Itoa(*keepIndexes)
+		case "db-path":
+			updates["INDEXER_DB_PATH"] = *dbPath
+		case "interval":
+			updates["INDEXER_INTERVAL"] = *interval
+		case "listen":
+			if *listen == "" {
+				updates["INDEXER_LISTEN_FLAG"] = ""
+			} else {
+				updates["INDEXER_LISTEN_FLAG"] = "--listen=" + *listen
+			}
+		}
+	})
+	return updates
+}
+
+// readEnvFile parses a systemd EnvironmentFile (KEY=VALUE lines, # comments ignored).
+func readEnvFile(path string) (_ map[string]string, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return map[string]string{}, err
+	}
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}()
+
+	result := map[string]string{}
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, _ := strings.Cut(line, "=")
+		result[strings.TrimSpace(k)] = strings.TrimSpace(v)
+	}
+	return result, scanner.Err()
+}
+
+// writeEnvFile writes env vars in canonical key order to path.
+func writeEnvFile(path string, env map[string]string) error {
+	order := []string{
+		"INDEXER_PATH", "INDEXER_NAME", "INDEXER_INCLUDE_HIDDEN",
+		"INDEXER_INCLUDE_NETWORK_MOUNTS", "INDEXER_FRESH",
+		"INDEXER_KEEP_INDEXES", "INDEXER_DB_PATH",
+		"INDEXER_SOCKET", "INDEXER_INTERVAL", "INDEXER_LISTEN_FLAG",
+	}
+	inOrder := map[string]bool{}
+	for _, k := range order {
+		inOrder[k] = true
+	}
+
+	var sb strings.Builder
+	for _, k := range order {
+		if v, ok := env[k]; ok {
+			fmt.Fprintf(&sb, "%s=%s\n", k, v)
+		}
+	}
+	for k, v := range env {
+		if !inOrder[k] {
+			fmt.Fprintf(&sb, "%s=%s\n", k, v)
+		}
+	}
+	return os.WriteFile(path, []byte(sb.String()), 0644)
 }
 
 func runInternalIndexMode(args []string) {
@@ -327,6 +482,50 @@ func queryDaemon(socketPath, listenAddr, endpoint string) error {
 	}
 
 	fmt.Println(strings.TrimSpace(string(body)))
+	return nil
+}
+
+// queryDaemonPretty is like queryDaemon but pretty-prints JSON responses.
+func queryDaemonPretty(socketPath, listenAddr, endpoint string) error {
+	client, url, err := buildClient(socketPath, listenAddr, endpoint)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request %s: %w", url, err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close response body: %v\n", closeErr)
+		}
+	}()
+
+	body, err := ioReadAllLimit(resp.Body, 2<<20)
+	if err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var out any
+	if err := json.Unmarshal(body, &out); err != nil {
+		fmt.Println(strings.TrimSpace(string(body)))
+		return nil
+	}
+	pretty, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		fmt.Println(strings.TrimSpace(string(body)))
+		return nil
+	}
+	fmt.Println(string(pretty))
 	return nil
 }
 
