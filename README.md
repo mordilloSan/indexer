@@ -137,6 +137,7 @@ Commands:
 - `indexer daemon ...` starts the API daemon and scheduler.
 - `indexer index ...` indexes one folder and exits. It accepts `--path`, `--name`, `--include-hidden`, `--include-network-mounts`, `--fresh`, `--keep-indexes`, `--db-path`, `--cpu-profile`, and `--verbose`.
 - `indexer status` and `indexer config` query a running daemon.
+- `indexer setup` opens a plain terminal wizard for editing `/etc/default/indexer` and restarting the service.
 - `indexer version` prints version/build info.
 
 On startup (CLI or systemd), `indexer` logs its version/build info.
@@ -502,6 +503,18 @@ Apply changes:
 
 ```bash
 sudo systemctl restart indexer.service
+```
+
+You can also use the built-in setup wizard:
+
+```bash
+sudo indexer setup
+```
+
+For scripts or one-off edits, `indexer config set` updates the same file without prompts:
+
+```bash
+sudo indexer config set --path "/media/My Drive" --interval 6h
 ```
 
 Service files are available in the `systemd/` directory for reference.
