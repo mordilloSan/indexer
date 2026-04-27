@@ -331,19 +331,30 @@ OpenAPI 3.0 document for the API (version 2.2.0).
 
 ```
 indexer/
-├── main.go              # Entry point, flag parsing, daemon setup
+├── main.go              # Thin CLI entrypoint
+├── internal/
+│   └── cli/
+│       ├── main.go          # Command dispatch and daemon startup
+│       ├── config.go        # Non-interactive config file updates
+│       ├── setup.go         # Interactive setup wizard
+│       ├── envfile.go       # systemd EnvironmentFile parsing and atomic writes
+│       ├── daemon_client.go # CLI client for daemon status/config endpoints
+│       ├── index_command.go # One-shot index command and index-mode subprocess
+│       └── util.go          # Shared CLI helpers
 ├── cmd/
 │   ├── daemon.go        # HTTP server (Unix socket + TCP) setup
 │   ├── handlers.go      # API request handlers
 │   └── handlers_sse.go  # Server-Sent Events streaming handlers
 ├── storage/
 │   ├── db.go            # SQLite schema and core database operations
-│   └── queries.go       # Query API (search, dirsize, entries, subfolders)
+│   ├── queries.go       # Query API (search, dirsize, entries, subfolders)
+│   └── maintenance.go   # Vacuum and pruning helpers
 └── indexing/
-    ├── indexingFiles.go # Filesystem traversal and aggregation
-    ├── export.go        # Index-to-entries serialization
-    ├── unix.go          # Unix-specific syscalls (inode, hardlinks)
-    └── iteminfo/        # Data structures and helpers
+    ├── traversal.go     # Filesystem traversal
+    ├── index.go         # Index aggregation and persistence
+    ├── files.go         # File metadata helpers
+    ├── mounts.go        # Mount classification
+    └── types.go         # Shared indexing types
 ```
 
 ## Database schema
@@ -516,6 +527,8 @@ For scripts or one-off edits, `indexer config set` updates the same file without
 ```bash
 sudo indexer config set --path "/media/My Drive" --interval 6h
 ```
+
+Add `--dry-run` to either command to print the resulting environment file without writing it or restarting the service.
 
 Service files are available in the `systemd/` directory for reference.
 

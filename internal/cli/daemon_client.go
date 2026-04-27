@@ -1,0 +1,105 @@
+package cli
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+)
+
+// queryDaemon sends a GET request to the given endpoint on the running daemon and prints the response.
+func queryDaemon(socketPath, listenAddr, endpoint string) error {
+	body, err := fetchDaemonBody(socketPath, listenAddr, endpoint)
+	if err != nil {
+		return err
+	}
+	fmt.Println(strings.TrimSpace(string(body)))
+	return nil
+}
+
+// queryDaemonPretty is like queryDaemon but pretty-prints JSON responses.
+func queryDaemonPretty(socketPath, listenAddr, endpoint string) error {
+	body, err := fetchDaemonBody(socketPath, listenAddr, endpoint)
+	if err != nil {
+		return err
+	}
+
+	var out any
+	if err := json.Unmarshal(body, &out); err != nil {
+		fmt.Println(strings.TrimSpace(string(body)))
+		return nil
+	}
+	pretty, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		fmt.Println(strings.TrimSpace(string(body)))
+		return nil
+	}
+	fmt.Println(string(pretty))
+	return nil
+}
+
+func fetchDaemonBody(socketPath, listenAddr, endpoint string) ([]byte, error) {
+	client, url, err := buildClient(socketPath, listenAddr, endpoint)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request %s: %w", url, err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close response body: %v\n", closeErr)
+		}
+	}()
+
+	body, err := ioReadAllLimit(resp.Body, 2<<20)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return body, nil
+}
+
+// buildClient returns an HTTP client and URL for reaching the daemon at the given endpoint.
+func buildClient(socketPath, listenAddr, endpoint string) (*http.Client, string, error) {
+	timeout := 5 * time.Second
+
+	if listenAddr != "" {
+		base := listenAddr
+		if strings.HasPrefix(base, "http://") || strings.HasPrefix(base, "https://") {
+			return &http.Client{Timeout: timeout}, strings.TrimRight(base, "/") + endpoint, nil
+		}
+		if strings.HasPrefix(base, ":") {
+			base = "127.0.0.1" + base
+		}
+		return &http.Client{Timeout: timeout}, "http://" + strings.TrimRight(base, "/") + endpoint, nil
+	}
+
+	if socketPath == "-" {
+		return nil, "", fmt.Errorf("requires either --listen or a unix socket (got --socket-path '-')")
+	}
+	if socketPath == "" {
+		socketPath = "/var/run/indexer.sock"
+	}
+
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", socketPath)
+		},
+	}
+	return &http.Client{Transport: tr, Timeout: timeout}, "http://unix" + endpoint, nil
+}
