@@ -11,6 +11,51 @@ import (
 	"time"
 )
 
+func queryDaemonSetupConfig(socketPath, listenAddr string) (setupConfig, error) {
+	body, err := fetchDaemonBody(socketPath, listenAddr, "/config")
+	if err != nil {
+		return setupConfig{}, err
+	}
+
+	var resp struct {
+		IndexName            string `json:"index_name"`
+		IndexPath            string `json:"index_path"`
+		IncludeHidden        bool   `json:"include_hidden"`
+		IncludeNetworkMounts bool   `json:"include_network_mounts"`
+		FreshIndex           bool   `json:"fresh_index"`
+		KeepIndexes          int    `json:"keep_indexes"`
+		DBPath               string `json:"db_path"`
+		SocketPath           string `json:"socket_path"`
+		ListenAddr           string `json:"listen_addr"`
+		Interval             string `json:"interval"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return setupConfig{}, fmt.Errorf("parse daemon config: %w", err)
+	}
+
+	socketPath = resp.SocketPath
+	if socketPath == "" {
+		socketPath = "-"
+	}
+	interval := resp.Interval
+	if interval == "0s" {
+		interval = "0"
+	}
+	return setupConfig{
+		IndexPath:            resp.IndexPath,
+		IndexName:            resp.IndexName,
+		IncludeHidden:        resp.IncludeHidden,
+		IncludeNetworkMounts: resp.IncludeNetworkMounts,
+		FreshIndex:           resp.FreshIndex,
+		KeepIndexes:          resp.KeepIndexes,
+		DBPath:               resp.DBPath,
+		SocketPath:           socketPath,
+		Interval:             interval,
+		ListenAddr:           resp.ListenAddr,
+		ListenFlag:           "",
+	}, nil
+}
+
 // queryDaemon sends a GET request to the given endpoint on the running daemon and prints the response.
 func queryDaemon(socketPath, listenAddr, endpoint string) error {
 	body, err := fetchDaemonBody(socketPath, listenAddr, endpoint)

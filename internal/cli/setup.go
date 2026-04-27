@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bufio"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -304,51 +303,6 @@ func setupConfigToEnv(cfg setupConfig) map[string]string {
 	}
 }
 
-func queryDaemonSetupConfig(socketPath, listenAddr string) (setupConfig, error) {
-	body, err := fetchDaemonBody(socketPath, listenAddr, "/config")
-	if err != nil {
-		return setupConfig{}, err
-	}
-
-	var resp struct {
-		IndexName            string `json:"index_name"`
-		IndexPath            string `json:"index_path"`
-		IncludeHidden        bool   `json:"include_hidden"`
-		IncludeNetworkMounts bool   `json:"include_network_mounts"`
-		FreshIndex           bool   `json:"fresh_index"`
-		KeepIndexes          int    `json:"keep_indexes"`
-		DBPath               string `json:"db_path"`
-		SocketPath           string `json:"socket_path"`
-		ListenAddr           string `json:"listen_addr"`
-		Interval             string `json:"interval"`
-	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return setupConfig{}, fmt.Errorf("parse daemon config: %w", err)
-	}
-
-	socketPath = resp.SocketPath
-	if socketPath == "" {
-		socketPath = "-"
-	}
-	interval := resp.Interval
-	if interval == "0s" {
-		interval = "0"
-	}
-	return setupConfig{
-		IndexPath:            resp.IndexPath,
-		IndexName:            resp.IndexName,
-		IncludeHidden:        resp.IncludeHidden,
-		IncludeNetworkMounts: resp.IncludeNetworkMounts,
-		FreshIndex:           resp.FreshIndex,
-		KeepIndexes:          resp.KeepIndexes,
-		DBPath:               resp.DBPath,
-		SocketPath:           socketPath,
-		Interval:             interval,
-		ListenAddr:           resp.ListenAddr,
-		ListenFlag:           "",
-	}, nil
-}
-
 func splitListenFlag(raw string) (listenAddr, extraFlag string) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -401,12 +355,10 @@ func runSetupWizard(reader *bufio.Reader, w io.Writer, cfg setupConfig) (setupCo
 }
 
 func printSetupSummary(w io.Writer, cfg setupConfig) error {
-	fields := setupSummaryFields(cfg)
-
 	var sb strings.Builder
 	sb.WriteString("\nReview\n------\n")
-	for _, field := range fields {
-		fmt.Fprintf(&sb, " %2d. %s: %s\n", field.Number, field.Label, field.Value)
+	for i, f := range setupFields {
+		fmt.Fprintf(&sb, " %2d. %s: %s\n", i+1, f.Label, f.Value(cfg))
 	}
 	if cfg.ListenFlag != "" && strings.TrimSpace(cfg.ListenAddr) == "" {
 		fmt.Fprintf(&sb, "     Preserved INDEXER_LISTEN_FLAG: %s\n", cfg.ListenFlag)
@@ -414,24 +366,6 @@ func printSetupSummary(w io.Writer, cfg setupConfig) error {
 	sb.WriteByte('\n')
 	_, err := io.WriteString(w, sb.String())
 	return err
-}
-
-type setupSummaryField struct {
-	Number int
-	Label  string
-	Value  string
-}
-
-func setupSummaryFields(cfg setupConfig) []setupSummaryField {
-	fields := make([]setupSummaryField, 0, len(setupFields))
-	for i, field := range setupFields {
-		fields = append(fields, setupSummaryField{
-			Number: i + 1,
-			Label:  field.Label,
-			Value:  field.Value(cfg),
-		})
-	}
-	return fields
 }
 
 func promptSetupField(reader *bufio.Reader, w io.Writer, cfg setupConfig, field int) (setupConfig, error) {
