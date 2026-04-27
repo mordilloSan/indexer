@@ -6,12 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/mordilloSan/go-logger/logger"
 
 	"github.com/mordilloSan/indexer/indexing"
 	"github.com/mordilloSan/indexer/storage"
@@ -109,7 +108,7 @@ func (b *workStreamBroadcaster) SendEvent(event string, data any) error {
 		default:
 			close(ch)
 			delete(b.subscribers, id)
-			logger.Warnf("Dropping slow work stream subscriber id=%d", id)
+			slog.Warn("dropping slow work stream subscriber", "id", id)
 		}
 	}
 
@@ -168,7 +167,7 @@ func (b *workStreamBroadcaster) subscriberCount() int {
 
 func sendSSEEvent(s sseEventSender, event string, data any) bool {
 	if err := s.SendEvent(event, data); err != nil {
-		logger.Warnf("SSE send %q failed: %v", event, err)
+		slog.Warn("SSE send failed", "event", event, "err", err)
 		return false
 	}
 	return true
@@ -176,7 +175,7 @@ func sendSSEEvent(s sseEventSender, event string, data any) bool {
 
 func sendSSEError(s sseEventSender, msg string) {
 	if err := s.SendError(msg); err != nil {
-		logger.Warnf("SSE send error event failed: %v", err)
+		slog.Warn("SSE send error event failed", "err", err)
 	}
 }
 
@@ -277,7 +276,7 @@ func (d *daemon) endWorkStream(b *workStreamBroadcaster) {
 // reindexPathWithProgress reindexes a path and emits progress events.
 func (d *daemon) reindexPathWithProgress(ctx context.Context, relativePath string, sender sseEventSender) {
 	start := time.Now()
-	logger.Infof("Starting reindex for path: %s", relativePath)
+	slog.Info("starting reindex", "path", relativePath)
 
 	indexID, err := d.store.LatestIndexID(ctx)
 	if err != nil {
@@ -297,7 +296,13 @@ func (d *daemon) reindexPathWithProgress(ctx context.Context, relativePath strin
 		return
 	}
 
-	index := indexing.Initialize(d.cfg.IndexName, d.cfg.IndexPath, d.cfg.IndexPath, d.cfg.IncludeHidden)
+	index := indexing.Initialize(
+		d.cfg.IndexName,
+		d.cfg.IndexPath,
+		d.cfg.IndexPath,
+		d.cfg.IncludeHidden,
+		indexing.WithNetworkMounts(d.cfg.IncludeNetworkMounts),
+	)
 	writer := storage.NewStreamingWriterWithProgress(ctx, d.db, indexID, 1000, func(filesWritten, dirsWritten int64, lastPath string) {
 		if (filesWritten+dirsWritten)%100 == 0 {
 			sendSSEEvent(sender, "progress", WorkProgressEvent{
@@ -312,7 +317,7 @@ func (d *daemon) reindexPathWithProgress(ctx context.Context, relativePath strin
 
 	if err := index.StartIndexingFromPath(relativePath); err != nil {
 		if closeErr := writer.Close(); closeErr != nil {
-			logger.Warnf("Failed to close streaming writer after reindex stream error: %v", closeErr)
+			slog.Warn("failed to close streaming writer after reindex stream error", "err", closeErr)
 		}
 		sendSSEError(sender, fmt.Sprintf("indexing failed: %v", err))
 		return
@@ -330,7 +335,7 @@ func (d *daemon) reindexPathWithProgress(ctx context.Context, relativePath strin
 		return
 	}
 	if deleted > 0 {
-		logger.Infof("Cleaned up %d deleted entries under %s", deleted, relativePath)
+		slog.Info("cleaned up deleted entries under path", "deleted", deleted, "path", relativePath)
 	}
 
 	var newSize int64
@@ -350,16 +355,16 @@ func (d *daemon) reindexPathWithProgress(ctx context.Context, relativePath strin
 	}
 
 	if stats, err := storage.WALCheckpointTruncate(ctx, d.db); err != nil {
-		logger.Warnf("WAL checkpoint failed after reindex: %v", err)
+		slog.Warn("WAL checkpoint failed after reindex", "err", err)
 	} else {
-		logger.Infof("WAL checkpoint complete after reindex in %v", stats.Duration)
+		slog.Info("WAL checkpoint complete after reindex", "duration", stats.Duration)
 	}
 	if err := storage.ReleaseSQLiteMemory(ctx, d.db); err != nil {
-		logger.Warnf("Failed to release SQLite memory after reindex: %v", err)
+		slog.Warn("failed to release SQLite memory after reindex", "err", err)
 	}
 
 	duration := time.Since(start)
-	logger.Infof("Reindex complete for path %s in %v", relativePath, duration)
+	slog.Info("reindex complete", "path", relativePath, "duration", duration)
 
 	sendSSEEvent(sender, "complete", WorkCompleteEvent{
 		Status:       "complete",
@@ -380,7 +385,7 @@ func (d *daemon) vacuumWithProgress(ctx context.Context, sender sseEventSender) 
 
 	indexID, err := d.store.LatestIndexID(ctx)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		logger.Warnf("vacuum: latest index id unavailable: %v", err)
+		slog.Warn("vacuum: latest index id unavailable", "err", err)
 		indexID = 0
 	}
 
@@ -393,7 +398,7 @@ func (d *daemon) vacuumWithProgress(ctx context.Context, sender sseEventSender) 
 	}
 
 	if _, err := storage.WALCheckpointTruncate(ctx, d.db); err != nil {
-		logger.Warnf("vacuum: wal checkpoint (pre) failed: %v", err)
+		slog.Warn("vacuum: wal checkpoint pre failed", "err", err)
 		if !sendSSEEvent(sender, "progress", WorkProgressEvent{
 			Operation: "vacuum",
 			Phase:     "pre_checkpoint",
@@ -413,12 +418,12 @@ func (d *daemon) vacuumWithProgress(ctx context.Context, sender sseEventSender) 
 
 	vs, err := storage.Vacuum(ctx, d.db)
 	if err != nil {
-		logger.Errorf("vacuum failed: %v", err)
+		slog.Error("vacuum failed", "err", err)
 		sendSSEError(sender, fmt.Sprintf("vacuum failed: %v", err))
 		return
 	}
 
-	logger.Infof("Vacuum complete in %v", vs.Duration)
+	slog.Info("vacuum complete", "duration", vs.Duration)
 
 	if !sendSSEEvent(sender, "progress", WorkProgressEvent{
 		Operation: "vacuum",
@@ -429,15 +434,15 @@ func (d *daemon) vacuumWithProgress(ctx context.Context, sender sseEventSender) 
 	}
 
 	if _, err := storage.WALCheckpointTruncate(ctx, d.db); err != nil {
-		logger.Warnf("vacuum: wal checkpoint (post) failed: %v", err)
+		slog.Warn("vacuum: wal checkpoint post failed", "err", err)
 	}
 	if err := storage.ReleaseSQLiteMemory(ctx, d.db); err != nil {
-		logger.Warnf("Failed to release SQLite memory after vacuum: %v", err)
+		slog.Warn("failed to release SQLite memory after vacuum", "err", err)
 	}
 
 	if indexID != 0 {
 		if _, err := d.db.ExecContext(ctx, `UPDATE indexes SET vacuum_duration_ms = ? WHERE id = ?;`, vs.Duration.Milliseconds(), indexID); err != nil {
-			logger.Warnf("vacuum: failed to persist duration: %v", err)
+			slog.Warn("vacuum: failed to persist duration", "err", err)
 		}
 	}
 
@@ -465,13 +470,12 @@ func (d *daemon) pruneWithProgress(ctx context.Context, keepLatest, maxAgeDays i
 
 	stats, err := d.store.PruneOldIndexes(ctx, keepLatest, maxAge)
 	if err != nil {
-		logger.Errorf("prune failed: %v", err)
+		slog.Error("prune failed", "err", err)
 		sendSSEError(sender, fmt.Sprintf("prune failed: %v", err))
 		return
 	}
 
-	logger.Infof("Prune complete in %v (deleted %d indexes, %d entries)",
-		stats.Duration, stats.DeletedIndexes, stats.DeletedEntries)
+	slog.Info("prune complete", "duration", stats.Duration, "deleted_indexes", stats.DeletedIndexes, "deleted_entries", stats.DeletedEntries)
 
 	if !sendSSEEvent(sender, "progress", WorkProgressEvent{
 		Operation: "prune",
@@ -482,10 +486,10 @@ func (d *daemon) pruneWithProgress(ctx context.Context, keepLatest, maxAgeDays i
 	}
 
 	if _, err := storage.WALCheckpointTruncate(ctx, d.db); err != nil {
-		logger.Warnf("prune: wal checkpoint failed: %v", err)
+		slog.Warn("prune: wal checkpoint failed", "err", err)
 	}
 	if err := storage.ReleaseSQLiteMemory(ctx, d.db); err != nil {
-		logger.Warnf("prune: failed to release SQLite memory: %v", err)
+		slog.Warn("prune: failed to release SQLite memory", "err", err)
 	}
 
 	sendSSEEvent(sender, "complete", WorkCompleteEvent{

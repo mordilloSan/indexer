@@ -29,7 +29,7 @@ The goal was to have a permanently running daemon with minimal memory footprint,
 - Streaming writes to SQLite (500-entry batches) to keep memory low (~150 MB for ~1M files).
 - Server-Sent Events (SSE) streaming for real-time progress updates during reindex and vacuum operations.
 - Hardlink-aware size accounting so totals match `du`; deleted entries are cleaned after each run.
-- Auto-index on a fixed interval plus manual `/index` endpoint; hidden file support is opt-in.
+- Auto-index on a fixed interval plus manual `/index` endpoint; hidden files and network mounts are opt-in.
 - WAL-enabled SQLite schema with incremental auto-vacuum and index pruning for automatic space reclamation.
 - Small store layer for search, dirsize, and path queries.
 
@@ -56,7 +56,19 @@ curl --unix-socket /tmp/indexer.sock 'http://localhost/search?q=log&limit=20'
 If you installed via systemd, you can also query status with:
 
 ```bash
-indexer --status
+indexer status
+```
+
+To index a folder once and exit:
+
+```bash
+indexer index --path /data --db-path /tmp/indexer.db
+```
+
+Network mounts such as NFS, SMB, and CIFS are skipped by default during recursive traversal. Enable them explicitly when you want to index a mounted share:
+
+```bash
+indexer index --path /mnt/share --include-network-mounts --db-path /tmp/indexer.db
 ```
 
 ## Installation
@@ -94,14 +106,14 @@ After installation, edit `/etc/default/indexer` to configure the path to index, 
 
 Notes:
 - The installers place the binary at `/usr/local/bin/indexer` (usually already on `$PATH`).
-- When installed via systemd, you typically manage the daemon via `systemctl`, but you can still run `indexer --version` / `indexer --help` from your shell.
+- When installed via systemd, you typically manage the daemon via `systemctl`, but you can still run `indexer version` / `indexer --help` from your shell.
 - Avoid running a second daemon manually against the same `--socket-path` / `--db-path` while the systemd service is running.
 
 Quick checks:
 
 ```bash
 command -v indexer || echo "indexer not on PATH (try /usr/local/bin/indexer)"
-indexer --version
+indexer version
 sudo systemctl status indexer.service --no-pager
 ```
 
@@ -112,13 +124,20 @@ sudo systemctl status indexer.service --no-pager
 | `--path` | **(required)** | Filesystem root to index |
 | `--name` | sanitized `path` | Index name (alphanumeric identifier) |
 | `--include-hidden` | `false` | Include dotfiles and dotdirs |
+| `--include-network-mounts` | `false` | Traverse network/external mounts such as NFS, SMB, and CIFS |
+| `--fresh` | `true` | Clear existing index data before a full index |
+| `--keep-indexes` | `0` | Automatically prune old index records after indexing; `0` disables automatic pruning. Use with `--fresh=false` when keeping history. |
 | `--db-path` | `/tmp/indexer.db` | SQLite database path (or `$INDEXER_DB_PATH`) |
 | `--socket-path` | `/var/run/indexer.sock` | Unix socket path for API |
 | `--listen` | *(disabled)* | TCP address for HTTP API (e.g., `:8080`) |
-| `--interval` | `0` (off) | Auto-index interval (`6h`, `30m`, etc.) |
+| `--interval` | `1h` | Auto-index interval (`6h`, `30m`, etc.); `0` disables |
 | `--verbose` | `false` | Enable debug logging |
-| `--status` | `false` | Query `/status` from a running daemon and exit |
-| `--version` | `false` | Print version/build info and exit |
+
+Commands:
+- `indexer daemon ...` starts the API daemon and scheduler.
+- `indexer index ...` indexes one folder and exits. It accepts `--path`, `--name`, `--include-hidden`, `--include-network-mounts`, `--fresh`, `--keep-indexes`, `--db-path`, `--cpu-profile`, and `--verbose`.
+- `indexer status` and `indexer config` query a running daemon.
+- `indexer version` prints version/build info.
 
 On startup (CLI or systemd), `indexer` logs its version/build info.
 
@@ -458,6 +477,15 @@ INDEXER_NAME=data
 
 # Include dotfiles/dotdirs (true/false)
 INDEXER_INCLUDE_HIDDEN=false
+
+# Include NFS/SMB/CIFS-style mounts while traversing (true/false)
+INDEXER_INCLUDE_NETWORK_MOUNTS=false
+
+# Clear existing DB data before each full index (true/false)
+INDEXER_FRESH=true
+
+# Keep this many latest index records after indexing; 0 disables automatic pruning
+INDEXER_KEEP_INDEXES=0
 
 # SQLite DB path
 INDEXER_DB_PATH=/tmp/indexer.db

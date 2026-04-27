@@ -5,13 +5,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/mordilloSan/go-logger/logger"
 
 	"github.com/mordilloSan/indexer/indexing"
 )
@@ -194,7 +194,7 @@ func (sw *StreamingWriter) writeBatch(batch []indexing.IndexEntry) error {
 	defer func() {
 		if err != nil {
 			if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
-				logger.Warnf("writeBatch rollback failed: %v", rollbackErr)
+				slog.Warn("writeBatch rollback failed", "err", rollbackErr)
 			}
 		}
 	}()
@@ -228,7 +228,7 @@ func Open(path string) (*sql.DB, error) {
 	var journalMode string
 	if err := db.QueryRowContext(ctx, `PRAGMA journal_mode=WAL;`).Scan(&journalMode); err != nil {
 		if closeErr := db.Close(); closeErr != nil {
-			logger.Warnf("failed to close DB after journal mode setup error: %v", closeErr)
+			slog.Warn("failed to close DB after journal mode setup error", "err", closeErr)
 		}
 		return nil, err
 	}
@@ -242,7 +242,7 @@ func Open(path string) (*sql.DB, error) {
 
 	if err := initSchema(ctx, db); err != nil {
 		if closeErr := db.Close(); closeErr != nil {
-			logger.Warnf("failed to close DB after schema init error: %v", closeErr)
+			slog.Warn("failed to close DB after schema init error", "err", closeErr)
 		}
 		return nil, err
 	}
@@ -320,7 +320,7 @@ func initSchema(ctx context.Context, db *sql.DB) error {
 	}
 	defer func() {
 		if closeErr := rows.Close(); closeErr != nil {
-			logger.Warnf("failed to close table_info rows for entries: %v", closeErr)
+			slog.Warn("failed to close table_info rows for entries", "err", closeErr)
 		}
 	}()
 	for rows.Next() {
@@ -401,7 +401,7 @@ func ensureColumn(ctx context.Context, db *sql.DB, table, column, definition str
 	}
 	defer func() {
 		if closeErr := rows.Close(); closeErr != nil {
-			logger.Warnf("failed to close table_info rows for %s: %v", table, closeErr)
+			slog.Warn("failed to close table_info rows", "table", table, "err", closeErr)
 		}
 	}()
 
@@ -645,7 +645,7 @@ func UpsertEntryWithSizeUpdate(ctx context.Context, db *sql.DB, indexID int64, e
 	defer func() {
 		if err != nil {
 			if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
-				logger.Warnf("UpsertEntryWithSizeUpdate rollback failed: %v", rollbackErr)
+				slog.Warn("UpsertEntryWithSizeUpdate rollback failed", "err", rollbackErr)
 			}
 		}
 	}()
@@ -676,7 +676,7 @@ func DeleteEntryWithSizeUpdate(ctx context.Context, db *sql.DB, indexID int64, r
 	defer func() {
 		if err != nil {
 			if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
-				logger.Warnf("DeleteEntryWithSizeUpdate rollback failed: %v", rollbackErr)
+				slog.Warn("DeleteEntryWithSizeUpdate rollback failed", "err", rollbackErr)
 			}
 		}
 	}()
@@ -706,7 +706,7 @@ func DeletePathRecursive(ctx context.Context, db *sql.DB, indexID int64, relativ
 	defer func() {
 		if err != nil {
 			if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
-				logger.Warnf("DeletePathRecursive rollback failed: %v", rollbackErr)
+				slog.Warn("DeletePathRecursive rollback failed", "err", rollbackErr)
 			}
 		}
 	}()
@@ -793,12 +793,12 @@ func ReleaseSQLiteMemory(ctx context.Context, db *sql.DB) error {
 
 	// Shrink SQLite's page cache
 	if _, err := db.ExecContext(ctx, `PRAGMA shrink_memory;`); err != nil {
-		logger.Warnf("Failed to shrink SQLite memory: %v", err)
+		slog.Warn("failed to shrink SQLite memory", "err", err)
 	}
 
 	// Optimize database (lightweight, doesn't rebuild like VACUUM)
 	if _, err := db.ExecContext(ctx, `PRAGMA optimize;`); err != nil {
-		logger.Warnf("Failed to optimize SQLite: %v", err)
+		slog.Warn("failed to optimize SQLite", "err", err)
 	}
 
 	return nil

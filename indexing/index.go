@@ -3,10 +3,9 @@ package indexing
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
-
-	"github.com/mordilloSan/go-logger/logger"
 )
 
 var (
@@ -40,14 +39,15 @@ type StreamingWriter interface {
 
 type Index struct {
 	ReducedIndex
-	Name            string              // unique name for this index
-	Path            string              // filesystem path being indexed
-	Source          string              // source identifier
-	includeHidden   bool                // whether to include hidden files and directories
-	FoundHardLinks  map[string]uint64   `json:"-"` // hardlink path -> size
-	processedInodes map[uint64]struct{} `json:"-"` // tracks processed inodes for hardlinks
-	totalSize       uint64              `json:"-"` // total size
-	mu              sync.RWMutex        `json:"-"` // protects concurrent access
+	Name                 string              // unique name for this index
+	Path                 string              // filesystem path being indexed
+	Source               string              // source identifier
+	includeHidden        bool                // whether to include hidden files and directories
+	includeNetworkMounts bool                // whether to traverse NFS/SMB/CIFS-style mounts
+	FoundHardLinks       map[string]uint64   `json:"-"` // hardlink path -> size
+	processedInodes      map[uint64]struct{} `json:"-"` // tracks processed inodes for hardlinks
+	totalSize            uint64              `json:"-"` // total size
+	mu                   sync.RWMutex        `json:"-"` // protects concurrent access
 
 	// Streaming mode fields
 	streamWriter StreamingWriter        `json:"-"` // where to send entries in streaming mode
@@ -62,12 +62,21 @@ const (
 	UNAVAILABLE IndexStatus = "unavailable"
 )
 
+type Option func(*Index)
+
+// WithNetworkMounts allows traversal into network/external mount points.
+func WithNetworkMounts(include bool) Option {
+	return func(idx *Index) {
+		idx.includeNetworkMounts = include
+	}
+}
+
 // Initialize creates a new index for the given path.
 // name: a unique name for this index
 // path: the filesystem path to index (e.g., "/", "/home", "/home/user/documents")
 // source: an optional source identifier (can be same as name)
 // includeHidden: whether to include hidden files and directories (starting with .)
-func Initialize(name string, path string, source string, includeHidden bool) *Index {
+func Initialize(name string, path string, source string, includeHidden bool, opts ...Option) *Index {
 	newIndex := &Index{
 		Name:            name,
 		Path:            path,
@@ -76,12 +85,15 @@ func Initialize(name string, path string, source string, includeHidden bool) *In
 		processedInodes: make(map[uint64]struct{}),
 		FoundHardLinks:  make(map[string]uint64),
 	}
+	for _, opt := range opts {
+		opt(newIndex)
+	}
 	newIndex.ReducedIndex = ReducedIndex{
 		Status:  READY,
 		IdxName: name,
 	}
 
-	logger.Infof("initialized index [%s] for path [%s] (includeHidden: %v)", name, path, includeHidden)
+	slog.Info("initialized index", "name", name, "path", path, "include_hidden", includeHidden, "include_network_mounts", newIndex.includeNetworkMounts)
 	return newIndex
 }
 
@@ -106,7 +118,7 @@ func (idx *Index) StartIndexing() error {
 	}
 
 	idx.SetStatus(INDEXING)
-	logger.Infof("starting indexing for [%s] at path [%s]", idx.Name, idx.Path)
+	slog.Info("starting indexing", "name", idx.Name, "path", idx.Path)
 
 	err := idx.indexDirectory("/")
 	if err != nil {
@@ -119,7 +131,7 @@ func (idx *Index) StartIndexing() error {
 	dirs := idx.NumDirs
 	files := idx.NumFiles
 	idx.mu.RUnlock()
-	logger.Infof("completed indexing for [%s]: %d directories, %d files", idx.Name, dirs, files)
+	slog.Info("completed indexing", "name", idx.Name, "dirs", dirs, "files", files)
 	return nil
 }
 
@@ -134,7 +146,7 @@ func (idx *Index) StartIndexingFromPath(relativePath string) error {
 		return fmt.Errorf("streaming mode is required; call EnableStreaming with a writer before indexing")
 	}
 
-	logger.Infof("starting partial reindex for [%s] at subpath [%s]", idx.Name, relativePath)
+	slog.Info("starting partial reindex", "name", idx.Name, "path", relativePath)
 
 	// Normalize the path
 	normalizedPath := NormalizeIndexPath(relativePath)
@@ -148,7 +160,7 @@ func (idx *Index) StartIndexingFromPath(relativePath string) error {
 	dirs := idx.NumDirs
 	files := idx.NumFiles
 	idx.mu.RUnlock()
-	logger.Infof("completed partial reindex for [%s]: %d directories, %d files", idx.Name, dirs, files)
+	slog.Info("completed partial reindex", "name", idx.Name, "dirs", dirs, "files", files)
 	return nil
 }
 

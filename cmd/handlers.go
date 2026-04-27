@@ -8,14 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/mordilloSan/go-logger/logger"
 
 	"github.com/mordilloSan/indexer/indexing"
 	"github.com/mordilloSan/indexer/storage"
@@ -43,7 +42,7 @@ func (d *daemon) handleIndex(w http.ResponseWriter, r *http.Request) {
 		})
 
 		if err := d.runIndexSubprocess(context.Background()); err != nil {
-			logger.Errorf("manual index failed: %v", err)
+			slog.Error("manual index failed", "err", err)
 			sendSSEError(stream, fmt.Sprintf("index failed: %v", err))
 			return
 		}
@@ -56,7 +55,7 @@ func (d *daemon) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}()
 	w.WriteHeader(http.StatusAccepted)
 	if _, err := w.Write([]byte(`{"status":"running"}`)); err != nil {
-		logger.Warnf("handleIndex: failed to write response: %v", err)
+		slog.Warn("handleIndex: failed to write response", "err", err)
 	}
 }
 
@@ -243,7 +242,7 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		if running {
 			addWarning(fmt.Sprintf("latest index unavailable: %v", err))
-			logger.Warnf("Status: latest index unavailable while indexing: %v", err)
+			slog.Warn("status: latest index unavailable while indexing", "err", err)
 		} else {
 			http.Error(w, fmt.Sprintf("error loading status: %v", err), http.StatusInternalServerError)
 			return
@@ -262,7 +261,7 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if running {
 			addWarning(fmt.Sprintf("stats unavailable: %v", err))
-			logger.Warnf("Status: global stats unavailable while indexing: %v", err)
+			slog.Warn("status: global stats unavailable while indexing", "err", err)
 		} else {
 			http.Error(w, fmt.Sprintf("error loading stats: %v", err), http.StatusInternalServerError)
 			return
@@ -577,23 +576,27 @@ func (d *daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 func (d *daemon) handleConfig(w http.ResponseWriter, r *http.Request) {
 	resp := struct {
-		IndexName     string `json:"index_name"`
-		IndexPath     string `json:"index_path"`
-		IncludeHidden bool   `json:"include_hidden"`
-		FreshIndex    bool   `json:"fresh_index"`
-		DBPath        string `json:"db_path"`
-		SocketPath    string `json:"socket_path"`
-		ListenAddr    string `json:"listen_addr"`
-		Interval      string `json:"interval"`
+		IndexName            string `json:"index_name"`
+		IndexPath            string `json:"index_path"`
+		IncludeHidden        bool   `json:"include_hidden"`
+		IncludeNetworkMounts bool   `json:"include_network_mounts"`
+		FreshIndex           bool   `json:"fresh_index"`
+		KeepIndexes          int    `json:"keep_indexes"`
+		DBPath               string `json:"db_path"`
+		SocketPath           string `json:"socket_path"`
+		ListenAddr           string `json:"listen_addr"`
+		Interval             string `json:"interval"`
 	}{
-		IndexName:     d.cfg.IndexName,
-		IndexPath:     d.cfg.IndexPath,
-		IncludeHidden: d.cfg.IncludeHidden,
-		FreshIndex:    d.cfg.FreshIndex,
-		DBPath:        d.cfg.DBPath,
-		SocketPath:    d.cfg.SocketPath,
-		ListenAddr:    d.cfg.ListenAddr,
-		Interval:      d.cfg.Interval.String(),
+		IndexName:            d.cfg.IndexName,
+		IndexPath:            d.cfg.IndexPath,
+		IncludeHidden:        d.cfg.IncludeHidden,
+		IncludeNetworkMounts: d.cfg.IncludeNetworkMounts,
+		FreshIndex:           d.cfg.FreshIndex,
+		KeepIndexes:          d.cfg.KeepIndexes,
+		DBPath:               d.cfg.DBPath,
+		SocketPath:           d.cfg.SocketPath,
+		ListenAddr:           d.cfg.ListenAddr,
+		Interval:             d.cfg.Interval.String(),
 	}
 	writeJSON(w, resp)
 }
@@ -601,7 +604,7 @@ func (d *daemon) handleConfig(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		logger.Warnf("failed to encode JSON response: %v", err)
+		slog.Warn("failed to encode JSON response", "err", err)
 	}
 }
 
@@ -633,7 +636,7 @@ func queryPathOrRoot(path string) (string, bool) {
 func serveOpenapi(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if _, err := w.Write([]byte(openapiSpec)); err != nil {
-		logger.Warnf("failed to write OpenAPI response: %v", err)
+		slog.Warn("failed to write OpenAPI response", "err", err)
 	}
 }
 

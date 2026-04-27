@@ -5,10 +5,10 @@ Requires=indexer.socket
 
 [Service]
 Type=simple
-Environment="INDEXER_PATH=/" "INDEXER_NAME=root" "INDEXER_INCLUDE_HIDDEN=true" "INDEXER_FRESH=true" "INDEXER_SOCKET=/var/run/indexer.sock" "INDEXER_DB_PATH=/tmp/indexer.db" "INDEXER_INTERVAL=1h" "INDEXER_LISTEN_FLAG="
+Environment="INDEXER_PATH=/" "INDEXER_NAME=root" "INDEXER_INCLUDE_HIDDEN=true" "INDEXER_INCLUDE_NETWORK_MOUNTS=false" "INDEXER_FRESH=true" "INDEXER_KEEP_INDEXES=0" "INDEXER_SOCKET=/var/run/indexer.sock" "INDEXER_DB_PATH=/tmp/indexer.db" "INDEXER_INTERVAL=1h" "INDEXER_LISTEN_FLAG="
 EnvironmentFile=-/etc/default/indexer
 ExecStartPre=/bin/sh -c 'if [ ! -f /etc/default/indexer ]; then echo "indexer: /etc/default/indexer missing; using unit defaults"; fi'
-ExecStart=/usr/local/bin/indexer daemon --path ${INDEXER_PATH} --name ${INDEXER_NAME} --include-hidden=${INDEXER_INCLUDE_HIDDEN} --fresh=${INDEXER_FRESH} --db-path ${INDEXER_DB_PATH} --socket-path ${INDEXER_SOCKET} --interval ${INDEXER_INTERVAL} ${INDEXER_LISTEN_FLAG}
+ExecStart=/usr/local/bin/indexer daemon --path ${INDEXER_PATH} --name ${INDEXER_NAME} --include-hidden=${INDEXER_INCLUDE_HIDDEN} --include-network-mounts=${INDEXER_INCLUDE_NETWORK_MOUNTS} --fresh=${INDEXER_FRESH} --keep-indexes ${INDEXER_KEEP_INDEXES} --db-path ${INDEXER_DB_PATH} --socket-path ${INDEXER_SOCKET} --interval ${INDEXER_INTERVAL} ${INDEXER_LISTEN_FLAG}
 Restart=on-failure
 RuntimeDirectory=indexer
 RuntimeDirectoryMode=0755

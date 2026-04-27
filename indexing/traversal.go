@@ -1,12 +1,11 @@
 package indexing
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
-
-	"github.com/mordilloSan/go-logger/logger"
 
 	"github.com/mordilloSan/indexer/indexing/iteminfo"
 )
@@ -31,7 +30,7 @@ func (idx *Index) indexDirectory(adjustedPath string) error {
 	}
 	defer func() {
 		if closeErr := dir.Close(); closeErr != nil {
-			logger.Warnf("Failed to close directory %s: %v", realPath, closeErr)
+			slog.Warn("failed to close directory", "path", realPath, "err", closeErr)
 		}
 	}()
 
@@ -74,7 +73,7 @@ func (idx *Index) indexDirectory(adjustedPath string) error {
 		Inode:        dirFileInfo.Inode,
 	}
 	if err := idx.streamWriter.Write(entry); err != nil {
-		logger.Errorf("Failed to stream directory entry: %v", err)
+		slog.Error("failed to stream directory entry", "err", err)
 	}
 	return nil
 }
@@ -107,7 +106,7 @@ func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjus
 			dirMapKey := dirMetadataKey(dirPath)
 
 			if err := idx.indexDirectory(dirPath); err != nil {
-				logger.Debugf("Failed to %v", err)
+				slog.Debug("failed to index directory", "path", dirPath, "err", err)
 				continue
 			}
 
@@ -140,7 +139,7 @@ func (idx *Index) GetDirInfo(dirInfo *os.File, stat os.FileInfo, realPath, adjus
 				Inode:        inodeFromFileInfo(file),
 			}
 			if err := idx.streamWriter.Write(entry); err != nil {
-				logger.Errorf("Failed to stream file entry: %v", err)
+				slog.Error("failed to stream file entry", "path", childPath, "err", err)
 			}
 		}
 	}
@@ -182,7 +181,7 @@ func (idx *Index) shouldSkip(isDir bool, isHidden bool, fullCombined string) boo
 			if idx.isLinuxSystemPath(fullCombined) {
 				return true
 			}
-			if idx.isExternalMount(fullCombined) {
+			if !idx.includeNetworkMounts && idx.isExternalMount(fullCombined) {
 				return true
 			}
 			if idx.isDockerOverlayMergedPath(fullCombined) {

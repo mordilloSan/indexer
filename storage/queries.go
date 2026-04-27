@@ -5,11 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
-
-	"github.com/mordilloSan/go-logger/logger"
 
 	"github.com/mordilloSan/indexer/indexing"
 )
@@ -111,7 +110,7 @@ func (s *Store) SearchEntries(ctx context.Context, pattern string, limit int) ([
 	}
 	defer func() {
 		if cerr := rows.Close(); cerr != nil {
-			logger.Warnf("rows close (search): %v", cerr)
+			slog.Warn("rows close failed", "query", "search", "err", cerr)
 		}
 	}()
 
@@ -237,7 +236,7 @@ func (s *Store) QueryPath(ctx context.Context, path string, recursive bool, limi
 	}
 	defer func() {
 		if cerr := rows.Close(); cerr != nil {
-			logger.Warnf("rows close (query): %v", cerr)
+			slog.Warn("rows close failed", "query", "entries", "err", cerr)
 		}
 	}()
 
@@ -409,7 +408,7 @@ func (s *Store) GetDirectSubfolders(ctx context.Context, parentPath string) ([]S
 	}
 	defer func() {
 		if cerr := rows.Close(); cerr != nil {
-			logger.Warnf("rows close (subfolders): %v", cerr)
+			slog.Warn("rows close failed", "query", "subfolders", "err", cerr)
 		}
 	}()
 

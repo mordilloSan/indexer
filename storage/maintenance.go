@@ -4,9 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"time"
-
-	"github.com/mordilloSan/go-logger/logger"
 )
 
 type WALCheckpointStats struct {
@@ -60,10 +59,11 @@ type PruneStats struct {
 	Duration       time.Duration
 }
 
-// PruneOldIndexes removes index records that haven't been updated in the specified retention period.
+// PruneOldIndexes removes index records outside the requested retention window.
 // This also cascades to delete all associated entries due to the FOREIGN KEY constraint.
 // keepLatest specifies how many most recent indexes to always keep (minimum 1).
 // maxAge specifies the maximum age for indexes to keep (e.g., 30 days).
+// If maxAge is zero or negative, pruning is count-only.
 func PruneOldIndexes(ctx context.Context, db *sql.DB, keepLatest int, maxAge time.Duration) (PruneStats, error) {
 	ctx = ensureContext(ctx)
 	if db == nil {
@@ -76,31 +76,31 @@ func PruneOldIndexes(ctx context.Context, db *sql.DB, keepLatest int, maxAge tim
 	start := time.Now()
 	var stats PruneStats
 
-	// Calculate cutoff timestamp
-	cutoffTime := time.Now().Add(-maxAge).Unix()
-
-	// First, count entries that will be deleted (for stats)
-	var entriesToDelete int64
-	err := db.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(num_files + num_dirs), 0)
-		FROM indexes
+	where := `
 		WHERE id NOT IN (
 			SELECT id FROM indexes ORDER BY last_indexed DESC LIMIT ?
 		)
-		AND last_indexed < ?;
-	`, keepLatest, cutoffTime).Scan(&entriesToDelete)
+	`
+	args := []any{keepLatest}
+	if maxAge > 0 {
+		where += ` AND last_indexed < ?`
+		args = append(args, time.Now().Add(-maxAge).Unix())
+	}
+
+	// First, count entries that will be deleted (for stats)
+	var entriesToDelete int64
+	countQuery := `
+		SELECT COALESCE(SUM(num_files + num_dirs), 0)
+		FROM indexes
+	` + where + `;`
+	err := db.QueryRowContext(ctx, countQuery, args...).Scan(&entriesToDelete)
 	if err != nil {
 		return PruneStats{}, fmt.Errorf("count entries to delete: %w", err)
 	}
 
 	// Delete old indexes (entries will cascade delete)
-	result, err := db.ExecContext(ctx, `
-		DELETE FROM indexes
-		WHERE id NOT IN (
-			SELECT id FROM indexes ORDER BY last_indexed DESC LIMIT ?
-		)
-		AND last_indexed < ?;
-	`, keepLatest, cutoffTime)
+	deleteQuery := `DELETE FROM indexes ` + where + `;`
+	result, err := db.ExecContext(ctx, deleteQuery, args...)
 	if err != nil {
 		return PruneStats{}, fmt.Errorf("delete old indexes: %w", err)
 	}
@@ -117,7 +117,7 @@ func PruneOldIndexes(ctx context.Context, db *sql.DB, keepLatest int, maxAge tim
 	// Run incremental vacuum to reclaim space
 	if _, err := db.ExecContext(ctx, `PRAGMA incremental_vacuum;`); err != nil {
 		// Log warning but don't fail the operation
-		logger.Warnf("Incremental vacuum failed after pruning: %v", err)
+		slog.Warn("incremental vacuum failed after pruning", "err", err)
 	}
 
 	return stats, nil
