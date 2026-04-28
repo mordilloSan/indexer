@@ -501,6 +501,25 @@ func ensureContext(ctx context.Context) context.Context {
 	return ctx
 }
 
+func escapeLikePattern(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `%`, `\%`)
+	value = strings.ReplaceAll(value, `_`, `\_`)
+	return value
+}
+
+// SubtreeLikePattern returns an escaped LIKE pattern for descendants of path.
+func SubtreeLikePattern(path string) string {
+	if path == "" || path == "/" {
+		return "/%"
+	}
+	trimmed := strings.TrimRight(path, "/")
+	if trimmed == "" {
+		return "/%"
+	}
+	return escapeLikePattern(trimmed) + "/%"
+}
+
 func parentDirKey(path string) string {
 	if path == "" || path == "/" {
 		return "/"
@@ -716,8 +735,8 @@ func DeletePathRecursive(ctx context.Context, db *sql.DB, indexID int64, relativ
 	err = tx.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(size), 0)
 		FROM entries
-		WHERE index_id = ? AND (relative_path = ? OR relative_path LIKE ?);
-	`, indexID, relativePath, relativePath+"/%").Scan(&totalSize)
+		WHERE index_id = ? AND (relative_path = ? OR relative_path LIKE ? ESCAPE '\');
+	`, indexID, relativePath, SubtreeLikePattern(relativePath)).Scan(&totalSize)
 	if err != nil {
 		return err
 	}
@@ -725,8 +744,8 @@ func DeletePathRecursive(ctx context.Context, db *sql.DB, indexID int64, relativ
 	// Delete all entries under this path (including the path itself)
 	_, err = tx.ExecContext(ctx, `
 		DELETE FROM entries
-		WHERE index_id = ? AND (relative_path = ? OR relative_path LIKE ?);
-	`, indexID, relativePath, relativePath+"/%")
+		WHERE index_id = ? AND (relative_path = ? OR relative_path LIKE ? ESCAPE '\');
+	`, indexID, relativePath, SubtreeLikePattern(relativePath))
 	if err != nil {
 		return err
 	}
@@ -772,8 +791,8 @@ func CleanupDeletedEntriesUnderPath(ctx context.Context, db *sql.DB, indexID int
 		DELETE FROM entries
 		WHERE index_id = ?
 		  AND last_seen < ?
-		  AND (relative_path = ? OR relative_path LIKE ?);
-	`, indexID, scanTime, relativePath, relativePath+"/%")
+		  AND (relative_path = ? OR relative_path LIKE ? ESCAPE '\');
+	`, indexID, scanTime, relativePath, SubtreeLikePattern(relativePath))
 	if err != nil {
 		return 0, err
 	}

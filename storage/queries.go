@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mordilloSan/indexer/indexing"
+	"github.com/mordilloSan/indexer/indexing/iteminfo"
 )
 
 // Store wraps the database connection
@@ -98,13 +99,38 @@ func (s *Store) SearchEntries(ctx context.Context, pattern string, limit int) ([
 		return nil, fmt.Errorf("failed to get latest index: %w", err)
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
+	opts := iteminfo.ParseSearch(pattern)
+	args := []any{indexID}
+	where := "index_id = ?"
+	if len(opts.Terms) > 0 {
+		termClauses := make([]string, 0, len(opts.Terms))
+		for _, term := range opts.Terms {
+			term = strings.TrimSpace(term)
+			if term == "" {
+				continue
+			}
+			if opts.CaseSensitive {
+				termClauses = append(termClauses, "instr(name, ?) > 0")
+				args = append(args, term)
+			} else {
+				termClauses = append(termClauses, "LOWER(name) LIKE LOWER(?) ESCAPE '\\'")
+				args = append(args, "%"+escapeLikePattern(term)+"%")
+			}
+		}
+		if len(termClauses) > 0 {
+			where += " AND (" + strings.Join(termClauses, " OR ") + ")"
+		}
+	}
+	args = append(args, limit)
+
+	query := fmt.Sprintf(`
         SELECT relative_path, name, type, size, mod_time, inode
         FROM entries
-        WHERE index_id = ? AND name LIKE ?
+        WHERE %s
         ORDER BY mod_time DESC
         LIMIT ?
-    `, indexID, "%"+pattern+"%", limit)
+    `, where)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("search failed: %w", err)
 	}
@@ -168,8 +194,10 @@ func (s *Store) DirSize(ctx context.Context, path string) (int64, error) {
 
 // UpsertEntry inserts or replaces a single entry (used for manual updates via API).
 // Path should be the relative path (e.g., "/dir/file.txt"), absPath is the full filesystem path.
-func (s *Store) UpsertEntry(indexID int64, entry EntryResult, absPath, typ string, hidden bool) error {
-	ctx := context.Background()
+func (s *Store) UpsertEntry(ctx context.Context, indexID int64, entry EntryResult, absPath, typ string, hidden bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	pathDepth := 0
 	if entry.Path != "/" {
 		pathDepth = strings.Count(entry.Path, "/")
@@ -210,10 +238,10 @@ func (s *Store) QueryPath(ctx context.Context, path string, recursive bool, limi
 		query = `
             SELECT relative_path, name, type, size, mod_time, inode
             FROM entries
-            WHERE index_id = ? AND (relative_path = ? OR relative_path LIKE ?)
+            WHERE index_id = ? AND (relative_path = ? OR relative_path LIKE ? ESCAPE '\')
             ORDER BY relative_path
         `
-		args = []any{indexID, path, path + "%"}
+		args = []any{indexID, path, SubtreeLikePattern(path)}
 	} else {
 		query = `
             SELECT relative_path, name, type, size, mod_time, inode
@@ -396,10 +424,10 @@ func (s *Store) GetDirectSubfolders(ctx context.Context, parentPath string) ([]S
             WHERE index_id = ?
               AND type = 'directory'
               AND path_depth = ?
-              AND relative_path LIKE ?
+              AND relative_path LIKE ? ESCAPE '\'
             ORDER BY name
         `
-		args = []any{indexID, childDepth, parentPath + "/%"}
+		args = []any{indexID, childDepth, SubtreeLikePattern(parentPath)}
 	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)

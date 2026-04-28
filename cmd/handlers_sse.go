@@ -342,8 +342,8 @@ func (d *daemon) reindexPathWithProgress(ctx context.Context, relativePath strin
 	err = d.db.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(size), 0)
 		FROM entries
-		WHERE index_id = ? AND (relative_path = ? OR relative_path LIKE ?);
-	`, indexID, relativePath, relativePath+"/%").Scan(&newSize)
+		WHERE index_id = ? AND (relative_path = ? OR relative_path LIKE ? ESCAPE '\');
+	`, indexID, relativePath, storage.SubtreeLikePattern(relativePath)).Scan(&newSize)
 	if err != nil {
 		sendSSEError(sender, fmt.Sprintf("query new size: %v", err))
 		return

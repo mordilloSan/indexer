@@ -46,6 +46,8 @@ type daemon struct {
 	usedSystemdSock bool
 }
 
+const databaseCheckTimeout = 30 * time.Second
+
 func NewDaemon(cfg DaemonConfig) (*daemon, error) {
 	if cfg.IndexPath == "" {
 		return nil, fmt.Errorf("index path is required")
@@ -185,10 +187,10 @@ func systemdUnixListener() net.Listener {
 
 	// Convert file to listener
 	l, err := net.FileListener(file)
+	if closeErr := file.Close(); closeErr != nil {
+		slog.Warn("failed to close original systemd socket file", "err", closeErr)
+	}
 	if err != nil {
-		if closeErr := file.Close(); closeErr != nil {
-			slog.Warn("failed to close file after FileListener error", "err", closeErr)
-		}
 		return nil
 	}
 
@@ -214,7 +216,13 @@ func (d *daemon) Run(ctx context.Context) error {
 
 // SpawnInitialIndex checks if database needs initial indexing and triggers it if needed
 func (d *daemon) SpawnInitialIndex(ctx context.Context) {
-	needsIndex, err := d.needsInitialIndex()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, databaseCheckTimeout)
+	defer cancel()
+
+	needsIndex, err := d.needsInitialIndex(checkCtx)
 	if err != nil {
 		slog.Error("failed to check if database needs indexing", "err", err)
 		return
@@ -231,10 +239,14 @@ func (d *daemon) SpawnInitialIndex(ctx context.Context) {
 }
 
 // needsInitialIndex checks if database is empty OR index has never been indexed
-func (d *daemon) needsInitialIndex() (bool, error) {
+func (d *daemon) needsInitialIndex(ctx context.Context) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	// Check if there are any indexes
 	var count int
-	err := d.db.QueryRow(`SELECT COUNT(*) FROM indexes`).Scan(&count)
+	err := d.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM indexes`).Scan(&count)
 	if err != nil {
 		return false, err
 	}
@@ -246,7 +258,7 @@ func (d *daemon) needsInitialIndex() (bool, error) {
 
 	// Check if the index has ever been indexed (last_indexed is NULL or 0)
 	var lastIndexed sql.NullInt64
-	err = d.db.QueryRow(`SELECT last_indexed FROM indexes WHERE name = ? LIMIT 1`, d.cfg.IndexName).Scan(&lastIndexed)
+	err = d.db.QueryRowContext(ctx, `SELECT last_indexed FROM indexes WHERE name = ? LIMIT 1`, d.cfg.IndexName).Scan(&lastIndexed)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// Index with this name doesn't exist - needs indexing
@@ -663,43 +675,70 @@ func openDatabaseWithIntegrityCheck(dbPath string) (*sql.DB, bool, error) {
 		return nil, false, err
 	}
 
-	// Check for corruption if database existed
-	if dbExisted {
-		if err := checkDatabaseIntegrity(db); err != nil {
-			slog.Warn("database corruption detected", "err", err)
-			slog.Warn("closing corrupted database and recreating")
-			if closeErr := db.Close(); closeErr != nil {
-				slog.Warn("failed to close corrupted database", "err", closeErr)
-			}
-			// Remove database and associated WAL files
-			if err := os.Remove(dbPath); err != nil {
-				return nil, false, fmt.Errorf("failed to remove corrupted database: %w", err)
-			}
-			if err := os.Remove(dbPath + "-wal"); err != nil && !errors.Is(err, os.ErrNotExist) {
-				slog.Warn("failed to remove WAL sidecar", "path", dbPath+"-wal", "err", err)
-			}
-			if err := os.Remove(dbPath + "-shm"); err != nil && !errors.Is(err, os.ErrNotExist) {
-				slog.Warn("failed to remove SHM sidecar", "path", dbPath+"-shm", "err", err)
-			}
-			// Recreate fresh database
-			db, err = storage.Open(dbPath)
-			if err != nil {
-				return nil, false, err
-			}
-			slog.Info("new database created", "db", dbPath)
-			dbExisted = false // Treat as new database
-		} else {
-			slog.Info("database integrity check passed")
-		}
+	if !dbExisted {
+		return db, false, nil
 	}
 
-	return db, dbExisted, nil
+	if err := checkDatabaseIntegrityWithTimeout(db); err != nil {
+		return recreateDatabaseAfterIntegrityFailure(dbPath, db, err)
+	}
+
+	slog.Info("database integrity check passed")
+	return db, true, nil
+}
+
+func checkDatabaseIntegrityWithTimeout(db *sql.DB) error {
+	ctx, cancel := context.WithTimeout(context.Background(), databaseCheckTimeout)
+	defer cancel()
+	return checkDatabaseIntegrity(ctx, db)
+}
+
+func recreateDatabaseAfterIntegrityFailure(dbPath string, db *sql.DB, integrityErr error) (*sql.DB, bool, error) {
+	if errors.Is(integrityErr, context.Canceled) || errors.Is(integrityErr, context.DeadlineExceeded) {
+		if closeErr := db.Close(); closeErr != nil {
+			slog.Warn("failed to close database after interrupted integrity check", "err", closeErr)
+		}
+		return nil, false, fmt.Errorf("database integrity check interrupted: %w", integrityErr)
+	}
+
+	slog.Warn("database corruption detected", "err", integrityErr)
+	slog.Warn("closing corrupted database and recreating")
+	if closeErr := db.Close(); closeErr != nil {
+		slog.Warn("failed to close corrupted database", "err", closeErr)
+	}
+	if err := removeDatabaseFiles(dbPath); err != nil {
+		return nil, false, err
+	}
+
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		return nil, false, err
+	}
+	slog.Info("new database created", "db", dbPath)
+	return db, false, nil
+}
+
+func removeDatabaseFiles(dbPath string) error {
+	if err := os.Remove(dbPath); err != nil {
+		return fmt.Errorf("failed to remove corrupted database: %w", err)
+	}
+	if err := os.Remove(dbPath + "-wal"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		slog.Warn("failed to remove WAL sidecar", "path", dbPath+"-wal", "err", err)
+	}
+	if err := os.Remove(dbPath + "-shm"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		slog.Warn("failed to remove SHM sidecar", "path", dbPath+"-shm", "err", err)
+	}
+	return nil
 }
 
 // checkDatabaseIntegrity runs SQLite's integrity_check to detect corruption
-func checkDatabaseIntegrity(db *sql.DB) error {
+func checkDatabaseIntegrity(ctx context.Context, db *sql.DB) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	var result string
-	err := db.QueryRow("PRAGMA integrity_check;").Scan(&result)
+	err := db.QueryRowContext(ctx, "PRAGMA integrity_check;").Scan(&result)
 	if err != nil {
 		return fmt.Errorf("integrity check query failed: %w", err)
 	}

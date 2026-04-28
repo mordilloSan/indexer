@@ -53,10 +53,7 @@ func (d *daemon) handleIndex(w http.ResponseWriter, r *http.Request) {
 			DurationMs: time.Since(start).Milliseconds(),
 		})
 	}()
-	w.WriteHeader(http.StatusAccepted)
-	if _, err := w.Write([]byte(`{"status":"running"}`)); err != nil {
-		slog.Warn("handleIndex: failed to write response", "err", err)
-	}
+	writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "running"})
 }
 
 func (d *daemon) handleReindex(w http.ResponseWriter, r *http.Request) {
@@ -97,8 +94,7 @@ func (d *daemon) handleReindex(w http.ResponseWriter, r *http.Request) {
 		d.reindexPathWithProgress(context.Background(), normalizedPath, stream)
 	}()
 
-	w.WriteHeader(http.StatusAccepted)
-	writeJSON(w, map[string]string{
+	writeJSONStatus(w, http.StatusAccepted, map[string]string{
 		"status": "running",
 		"path":   normalizedPath,
 	})
@@ -126,8 +122,7 @@ func (d *daemon) handleVacuum(w http.ResponseWriter, r *http.Request) {
 		d.vacuumWithProgress(context.Background(), stream)
 	}()
 
-	w.WriteHeader(http.StatusAccepted)
-	writeJSON(w, map[string]string{"status": "running"})
+	writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "running"})
 }
 
 func (d *daemon) handlePrune(w http.ResponseWriter, r *http.Request) {
@@ -171,8 +166,7 @@ func (d *daemon) handlePrune(w http.ResponseWriter, r *http.Request) {
 		d.pruneWithProgress(context.Background(), keepLatest, maxAgeDays, stream)
 	}()
 
-	w.WriteHeader(http.StatusAccepted)
-	writeJSON(w, map[string]string{
+	writeJSONStatus(w, http.StatusAccepted, map[string]string{
 		"status":       "running",
 		"keep_latest":  fmt.Sprintf("%d", keepLatest),
 		"max_age_days": fmt.Sprintf("%d", maxAgeDays),
@@ -602,7 +596,12 @@ func (d *daemon) handleConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
+	writeJSONStatus(w, http.StatusOK, v)
+}
+
+func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		slog.Warn("failed to encode JSON response", "err", err)
 	}
