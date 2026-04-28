@@ -827,7 +827,7 @@ func enableInlineIndexing(t *testing.T) {
 	t.Helper()
 	prev := indexerSpawnOverride
 	indexerSpawnOverride = func(d *daemon, ctx context.Context) error {
-		return runIndex(ctx, d.db, d.cfg.IndexName, d.cfg.IndexPath, d.cfg.IncludeHidden)
+		return runIndex(ctx, d.db, d.cfg.IndexName, d.cfg.IndexPath, d.cfg.IncludeHidden, d.cfg.IncludeNetworkMounts)
 	}
 	t.Cleanup(func() { indexerSpawnOverride = prev })
 }

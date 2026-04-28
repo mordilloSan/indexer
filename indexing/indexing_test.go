@@ -271,6 +271,31 @@ func TestShouldSkipDockerOverlayMergedWhenIndexingDockerRoot(t *testing.T) {
 	}
 }
 
+func TestShouldSkipExternalMountRespectsNetworkMountOption(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("linux-specific path behavior")
+	}
+
+	externalMountsOnce = sync.Once{}
+	externalMountsOnce.Do(func() {
+		externalMountPoints = map[string]string{"/mnt/share": "nfs"}
+	})
+	defer func() {
+		externalMountsOnce = sync.Once{}
+		externalMountPoints = nil
+	}()
+
+	defaultIdx := Initialize("test", "/mnt/share", "/mnt/share", false)
+	if !defaultIdx.shouldSkip(true, false, "/nested") {
+		t.Fatal("expected network mount contents to be skipped by default")
+	}
+
+	includeIdx := Initialize("test", "/mnt/share", "/mnt/share", false, WithNetworkMounts(true))
+	if includeIdx.shouldSkip(true, false, "/nested") {
+		t.Fatal("expected network mount contents to be indexed when option is enabled")
+	}
+}
+
 func TestIsHidden(t *testing.T) {
 	mock := testhelpers.NewMockFileSystem(t)
 	defer mock.Cleanup()

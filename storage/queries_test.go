@@ -91,6 +91,124 @@ func TestSearchEntriesWithType(t *testing.T) {
 	}
 }
 
+func TestSearchEntriesUsesParsedTerms(t *testing.T) {
+	ctx, db, dbPath := setupTestDB(t)
+	indexID := insertTestIndex(t, db)
+
+	now := time.Now()
+	entries := []indexing.IndexEntry{
+		{RelativePath: "/alpha.txt", AbsolutePath: "/alpha.txt", Name: "alpha.txt", Size: 1, ModTime: now, Type: "file", Inode: 1},
+		{RelativePath: "/beta.txt", AbsolutePath: "/beta.txt", Name: "beta.txt", Size: 1, ModTime: now.Add(time.Second), Type: "file", Inode: 2},
+		{RelativePath: "/AlphaExact.txt", AbsolutePath: "/AlphaExact.txt", Name: "AlphaExact.txt", Size: 1, ModTime: now.Add(2 * time.Second), Type: "file", Inode: 3},
+	}
+	for _, entry := range entries {
+		if _, err := UpdateEntry(ctx, db, indexID, entry); err != nil {
+			t.Fatalf("insert %s: %v", entry.RelativePath, err)
+		}
+	}
+
+	store := NewStoreWithDB(db, dbPath)
+	results, err := store.SearchEntries(ctx, "alpha|beta", 100)
+	if err != nil {
+		t.Fatalf("search OR terms: %v", err)
+	}
+	assertResultNames(t, results, map[string]bool{
+		"alpha.txt":      true,
+		"beta.txt":       true,
+		"AlphaExact.txt": true,
+	})
+
+	results, err = store.SearchEntries(ctx, "case:exact Alpha", 100)
+	if err != nil {
+		t.Fatalf("search case exact: %v", err)
+	}
+	assertResultNames(t, results, map[string]bool{
+		"AlphaExact.txt": true,
+	})
+}
+
+func TestQueryPathRecursiveUsesPathBoundary(t *testing.T) {
+	ctx, db, dbPath := setupTestDB(t)
+	indexID := insertTestIndex(t, db)
+	seedDirectories(t, ctx, db, indexID, []directorySeed{
+		{path: "/home", size: 100},
+		{path: "/home/user", size: 50},
+		{path: "/home-backup", size: 200},
+		{path: "/homeassistant", size: 300},
+	})
+
+	store := NewStoreWithDB(db, dbPath)
+	results, err := store.QueryPath(ctx, "/home", true, 0, 0)
+	if err != nil {
+		t.Fatalf("query path: %v", err)
+	}
+	assertResultPaths(t, results, map[string]bool{
+		"/home":      true,
+		"/home/user": true,
+	})
+}
+
+func TestPathQueriesEscapeLikeWildcards(t *testing.T) {
+	ctx, db, dbPath := setupTestDB(t)
+	indexID := insertTestIndex(t, db)
+	seedDirectories(t, ctx, db, indexID, []directorySeed{
+		{path: "/data%_set", size: 100},
+		{path: "/data%_set/child", size: 50},
+		{path: "/dataXXset", size: 200},
+		{path: "/dataXXset/child", size: 75},
+	})
+
+	store := NewStoreWithDB(db, dbPath)
+	results, err := store.QueryPath(ctx, "/data%_set", true, 0, 0)
+	if err != nil {
+		t.Fatalf("query escaped path: %v", err)
+	}
+	assertResultPaths(t, results, map[string]bool{
+		"/data%_set":       true,
+		"/data%_set/child": true,
+	})
+
+	subfolders, err := store.GetDirectSubfolders(ctx, "/data%_set")
+	if err != nil {
+		t.Fatalf("query escaped subfolders: %v", err)
+	}
+	if len(subfolders) != 1 || subfolders[0].Path != "/data%_set/child" {
+		t.Fatalf("subfolders = %+v, want only /data%%_set/child", subfolders)
+	}
+}
+
+func TestDeletePathRecursiveEscapesLikeWildcards(t *testing.T) {
+	ctx, db, _ := setupTestDB(t)
+	indexID := insertTestIndex(t, db)
+	seedDirectories(t, ctx, db, indexID, []directorySeed{
+		{path: "/", size: 425},
+		{path: "/data%_set", size: 150},
+		{path: "/data%_set/child", size: 50},
+		{path: "/dataXXset", size: 275},
+		{path: "/dataXXset/child", size: 75},
+	})
+
+	if err := DeletePathRecursive(ctx, db, indexID, "/data%_set"); err != nil {
+		t.Fatalf("delete escaped path: %v", err)
+	}
+
+	var deletedCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM entries WHERE relative_path = ? OR relative_path LIKE ? ESCAPE '\'`, "/data%_set", SubtreeLikePattern("/data%_set")).Scan(&deletedCount); err != nil {
+		t.Fatalf("count deleted subtree: %v", err)
+	}
+	if deletedCount != 0 {
+		t.Fatalf("deleted subtree count = %d, want 0", deletedCount)
+	}
+
+	var siblingCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM entries WHERE relative_path = ? OR relative_path LIKE ? ESCAPE '\'`, "/dataXXset", SubtreeLikePattern("/dataXXset")).Scan(&siblingCount); err != nil {
+		t.Fatalf("count sibling subtree: %v", err)
+	}
+	if siblingCount != 2 {
+		t.Fatalf("sibling subtree count = %d, want 2", siblingCount)
+	}
+}
+
 type folderExpectation struct {
 	name string
 	size int64
@@ -176,6 +294,30 @@ func assertSubfolders(t *testing.T, ctx context.Context, store *Store, path stri
 		}
 		if results[i].Size != exp.size {
 			t.Errorf("result[%d] size = %d, want %d", i, results[i].Size, exp.size)
+		}
+	}
+}
+
+func assertResultPaths(t *testing.T, results []EntryResult, expected map[string]bool) {
+	t.Helper()
+	if len(results) != len(expected) {
+		t.Fatalf("expected %d results, got %d: %+v", len(expected), len(results), results)
+	}
+	for _, result := range results {
+		if !expected[result.Path] {
+			t.Fatalf("unexpected path %s in results %+v", result.Path, results)
+		}
+	}
+}
+
+func assertResultNames(t *testing.T, results []EntryResult, expected map[string]bool) {
+	t.Helper()
+	if len(results) != len(expected) {
+		t.Fatalf("expected %d results, got %d: %+v", len(expected), len(results), results)
+	}
+	for _, result := range results {
+		if !expected[result.Name] {
+			t.Fatalf("unexpected name %s in results %+v", result.Name, results)
 		}
 	}
 }

@@ -8,14 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/mordilloSan/go-logger/logger"
 
 	"github.com/mordilloSan/indexer/indexing"
 	"github.com/mordilloSan/indexer/storage"
@@ -43,7 +42,7 @@ func (d *daemon) handleIndex(w http.ResponseWriter, r *http.Request) {
 		})
 
 		if err := d.runIndexSubprocess(context.Background()); err != nil {
-			logger.Errorf("manual index failed: %v", err)
+			slog.Error("manual index failed", "err", err)
 			sendSSEError(stream, fmt.Sprintf("index failed: %v", err))
 			return
 		}
@@ -54,10 +53,7 @@ func (d *daemon) handleIndex(w http.ResponseWriter, r *http.Request) {
 			DurationMs: time.Since(start).Milliseconds(),
 		})
 	}()
-	w.WriteHeader(http.StatusAccepted)
-	if _, err := w.Write([]byte(`{"status":"running"}`)); err != nil {
-		logger.Warnf("handleIndex: failed to write response: %v", err)
-	}
+	writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "running"})
 }
 
 func (d *daemon) handleReindex(w http.ResponseWriter, r *http.Request) {
@@ -98,8 +94,7 @@ func (d *daemon) handleReindex(w http.ResponseWriter, r *http.Request) {
 		d.reindexPathWithProgress(context.Background(), normalizedPath, stream)
 	}()
 
-	w.WriteHeader(http.StatusAccepted)
-	writeJSON(w, map[string]string{
+	writeJSONStatus(w, http.StatusAccepted, map[string]string{
 		"status": "running",
 		"path":   normalizedPath,
 	})
@@ -127,8 +122,7 @@ func (d *daemon) handleVacuum(w http.ResponseWriter, r *http.Request) {
 		d.vacuumWithProgress(context.Background(), stream)
 	}()
 
-	w.WriteHeader(http.StatusAccepted)
-	writeJSON(w, map[string]string{"status": "running"})
+	writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "running"})
 }
 
 func (d *daemon) handlePrune(w http.ResponseWriter, r *http.Request) {
@@ -172,8 +166,7 @@ func (d *daemon) handlePrune(w http.ResponseWriter, r *http.Request) {
 		d.pruneWithProgress(context.Background(), keepLatest, maxAgeDays, stream)
 	}()
 
-	w.WriteHeader(http.StatusAccepted)
-	writeJSON(w, map[string]string{
+	writeJSONStatus(w, http.StatusAccepted, map[string]string{
 		"status":       "running",
 		"keep_latest":  fmt.Sprintf("%d", keepLatest),
 		"max_age_days": fmt.Sprintf("%d", maxAgeDays),
@@ -243,7 +236,7 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		if running {
 			addWarning(fmt.Sprintf("latest index unavailable: %v", err))
-			logger.Warnf("Status: latest index unavailable while indexing: %v", err)
+			slog.Warn("status: latest index unavailable while indexing", "err", err)
 		} else {
 			http.Error(w, fmt.Sprintf("error loading status: %v", err), http.StatusInternalServerError)
 			return
@@ -262,7 +255,7 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if running {
 			addWarning(fmt.Sprintf("stats unavailable: %v", err))
-			logger.Warnf("Status: global stats unavailable while indexing: %v", err)
+			slog.Warn("status: global stats unavailable while indexing", "err", err)
 		} else {
 			http.Error(w, fmt.Sprintf("error loading stats: %v", err), http.StatusInternalServerError)
 			return
@@ -577,31 +570,40 @@ func (d *daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 func (d *daemon) handleConfig(w http.ResponseWriter, r *http.Request) {
 	resp := struct {
-		IndexName     string `json:"index_name"`
-		IndexPath     string `json:"index_path"`
-		IncludeHidden bool   `json:"include_hidden"`
-		FreshIndex    bool   `json:"fresh_index"`
-		DBPath        string `json:"db_path"`
-		SocketPath    string `json:"socket_path"`
-		ListenAddr    string `json:"listen_addr"`
-		Interval      string `json:"interval"`
+		IndexName            string `json:"index_name"`
+		IndexPath            string `json:"index_path"`
+		IncludeHidden        bool   `json:"include_hidden"`
+		IncludeNetworkMounts bool   `json:"include_network_mounts"`
+		FreshIndex           bool   `json:"fresh_index"`
+		KeepIndexes          int    `json:"keep_indexes"`
+		DBPath               string `json:"db_path"`
+		SocketPath           string `json:"socket_path"`
+		ListenAddr           string `json:"listen_addr"`
+		Interval             string `json:"interval"`
 	}{
-		IndexName:     d.cfg.IndexName,
-		IndexPath:     d.cfg.IndexPath,
-		IncludeHidden: d.cfg.IncludeHidden,
-		FreshIndex:    d.cfg.FreshIndex,
-		DBPath:        d.cfg.DBPath,
-		SocketPath:    d.cfg.SocketPath,
-		ListenAddr:    d.cfg.ListenAddr,
-		Interval:      d.cfg.Interval.String(),
+		IndexName:            d.cfg.IndexName,
+		IndexPath:            d.cfg.IndexPath,
+		IncludeHidden:        d.cfg.IncludeHidden,
+		IncludeNetworkMounts: d.cfg.IncludeNetworkMounts,
+		FreshIndex:           d.cfg.FreshIndex,
+		KeepIndexes:          d.cfg.KeepIndexes,
+		DBPath:               d.cfg.DBPath,
+		SocketPath:           d.cfg.SocketPath,
+		ListenAddr:           d.cfg.ListenAddr,
+		Interval:             d.cfg.Interval.String(),
 	}
 	writeJSON(w, resp)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
+	writeJSONStatus(w, http.StatusOK, v)
+}
+
+func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		logger.Warnf("failed to encode JSON response: %v", err)
+		slog.Warn("failed to encode JSON response", "err", err)
 	}
 }
 
@@ -633,7 +635,7 @@ func queryPathOrRoot(path string) (string, bool) {
 func serveOpenapi(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if _, err := w.Write([]byte(openapiSpec)); err != nil {
-		logger.Warnf("failed to write OpenAPI response: %v", err)
+		slog.Warn("failed to write OpenAPI response", "err", err)
 	}
 }
 

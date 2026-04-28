@@ -2,13 +2,12 @@ package indexing
 
 import (
 	"bufio"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
-
-	"github.com/mordilloSan/go-logger/logger"
 )
 
 var (
@@ -118,12 +117,12 @@ func loadExternalMountPoints() map[string]string {
 
 	file, err := os.Open("/proc/self/mountinfo")
 	if err != nil {
-		logger.Warnf("unable to read mountinfo: %v", err)
+		slog.Warn("unable to read mountinfo", "err", err)
 		return mounts
 	}
 	defer func() {
 		if closeErr := file.Close(); closeErr != nil {
-			logger.Warnf("unable to close mountinfo file: %v", closeErr)
+			slog.Warn("unable to close mountinfo file", "err", closeErr)
 		}
 	}()
 
@@ -138,7 +137,7 @@ func loadExternalMountPoints() map[string]string {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		logger.Warnf("error while scanning mountinfo: %v", err)
+		slog.Warn("error while scanning mountinfo", "err", err)
 	}
 	return mounts
 }

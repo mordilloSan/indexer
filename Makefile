@@ -140,9 +140,9 @@ test:
 	   trap 'rm -f "$$tmp"' EXIT; \
 	   $(GO_BIN) test ./... -timeout 5m -count=1 -run . -json > "$$tmp"; \
 	   awk ' \
-	     /"Action":"pass"/ && /"Package":/ && !/"Test":/ { match($$0,/"Package":"([^"]+)"/,a); printf("ok      %s\n",a[1]); next } \
-	     /"Action":"fail"/ && /"Package":/ && !/"Test":/ { match($$0,/"Package":"([^"]+)"/,a); printf("FAIL    %s\n",a[1]); next } \
-	     /"Action":"skip"/ && /"Package":/ && !/"Test":/ { match($$0,/"Package":"([^"]+)"/,a); printf("SKIP    %s\n",a[1]); next } \
+	     /"Action":"pass"/ && /"Package":/ && !/"Test":/ { pkg=$$0; sub(/.*"Package":"/,"",pkg); sub(/".*/,"",pkg); printf("ok      %s\n",pkg); next } \
+	     /"Action":"fail"/ && /"Package":/ && !/"Test":/ { pkg=$$0; sub(/.*"Package":"/,"",pkg); sub(/".*/,"",pkg); printf("FAIL    %s\n",pkg); next } \
+	     /"Action":"skip"/ && /"Package":/ && !/"Test":/ { pkg=$$0; sub(/.*"Package":"/,"",pkg); sub(/".*/,"",pkg); printf("SKIP    %s\n",pkg); next } \
 	     /"Action":"pass"/ && /"Test":/ { pass++ } \
 	     /"Action":"fail"/ && /"Test":/ { fail++ } \
 	     /"Action":"skip"/ && /"Test":/ { skip++ } \
