@@ -10,6 +10,7 @@ import (
 
 	"github.com/mordilloSan/indexer/cmd"
 	"github.com/mordilloSan/indexer/internal/version"
+	"github.com/mordilloSan/indexer/logging"
 )
 
 func runInternalIndexMode(args []string) {
@@ -32,7 +33,7 @@ func runIndexCommand(flagSetName string, args []string) {
 		os.Exit(1)
 	}
 
-	configureLogger(*verbose)
+	logging.Configure("indexer-index", *verbose)
 	slog.Info("indexer starting", "version", version.String(), "mode", "index")
 
 	if *indexPath == "" {

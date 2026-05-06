@@ -63,14 +63,6 @@ func parseInterval(s string) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
-func configureLogger(verbose bool) {
-	level := slog.LevelInfo
-	if verbose {
-		level = slog.LevelDebug
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
-}
-
 func flagWasSet(fs *flag.FlagSet, name string) bool {
 	wasSet := false
 	fs.Visit(func(f *flag.Flag) {

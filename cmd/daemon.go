@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -302,6 +303,9 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 	mux.HandleFunc("/entries", d.handleEntries)
 	mux.HandleFunc("/config", d.handleConfig)
 
+	handler := loggerMiddleware(recoveryMiddleware(mux))
+	errorLog := log.New(httpErrorLogAdapter{}, "", 0)
+
 	errCh := make(chan error, 2)
 	serverCount := 0
 
@@ -312,7 +316,7 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 			return err
 		}
 
-		srv := &http.Server{Handler: mux, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second}
+		srv := &http.Server{Handler: handler, ErrorLog: errorLog, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second}
 		d.servers = append(d.servers, srv)
 		serverCount++
 		if d.usedSystemdSock {
@@ -327,7 +331,7 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 
 	// Optional TCP listener
 	if d.cfg.ListenAddr != "" {
-		tcpSrv := &http.Server{Addr: d.cfg.ListenAddr, Handler: mux, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second}
+		tcpSrv := &http.Server{Addr: d.cfg.ListenAddr, Handler: handler, ErrorLog: errorLog, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second}
 		d.servers = append(d.servers, tcpSrv)
 		serverCount++
 		slog.Info("API listening", "addr", "http://localhost"+d.cfg.ListenAddr)
@@ -807,7 +811,10 @@ func logLatestIndexStatus(db *sql.DB) {
 		if li.LastIndexed.Valid && li.LastIndexed.Int64 > 0 {
 			last = time.Unix(li.LastIndexed.Int64, 0).UTC().Format(time.RFC3339)
 		}
-		slog.Info("latest index", "name", li.Name, "last_indexed", last, "dirs", li.NumDirs, "files", li.NumFiles)
+		slog.Info(
+			fmt.Sprintf("latest index %q: %d dirs, %d files", li.Name, li.NumDirs, li.NumFiles),
+			"name", li.Name, "last_indexed", last, "dirs", li.NumDirs, "files", li.NumFiles,
+		)
 	case sql.ErrNoRows:
 		slog.Info("no prior index metadata found in database")
 	default:

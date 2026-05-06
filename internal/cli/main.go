@@ -11,6 +11,7 @@ import (
 
 	"github.com/mordilloSan/indexer/cmd"
 	"github.com/mordilloSan/indexer/internal/version"
+	"github.com/mordilloSan/indexer/logging"
 )
 
 const (
@@ -83,7 +84,7 @@ func runDaemon(args []string) {
 		os.Exit(1)
 	}
 
-	configureLogger(*verbose)
+	logging.Configure("indexer", *verbose)
 	slog.Info("indexer starting", "version", version.String(), "mode", "daemon")
 
 	if *indexPath == "" {
