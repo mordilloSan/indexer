@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -18,11 +19,75 @@ import (
 
 const (
 	defaultDBPath = "indexer.db"
-	busyTimeoutMS = 5000
 	schemaTimeout = 30 * time.Second
 	batchSize     = 500
 	batchTimeout  = 1 * time.Second
 )
+
+type OpenOptions struct {
+	BusyTimeout     time.Duration
+	JournalMode     string
+	Synchronous     string
+	AutoVacuum      string
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxIdleTime time.Duration
+}
+
+func DefaultOpenOptions() OpenOptions {
+	return OpenOptions{
+		BusyTimeout:     5 * time.Second,
+		JournalMode:     "WAL",
+		Synchronous:     "OFF",
+		AutoVacuum:      "INCREMENTAL",
+		MaxOpenConns:    5,
+		MaxIdleConns:    2,
+		ConnMaxIdleTime: 5 * time.Minute,
+	}
+}
+
+func NormalizeOpenOptions(opts OpenOptions) (OpenOptions, error) {
+	defaults := DefaultOpenOptions()
+	if opts.JournalMode == "" {
+		opts.JournalMode = defaults.JournalMode
+	}
+	if opts.Synchronous == "" {
+		opts.Synchronous = defaults.Synchronous
+	}
+	if opts.AutoVacuum == "" {
+		opts.AutoVacuum = defaults.AutoVacuum
+	}
+
+	if opts.BusyTimeout < 0 {
+		return OpenOptions{}, fmt.Errorf("db busy timeout must be non-negative")
+	}
+	if opts.MaxOpenConns < 0 {
+		return OpenOptions{}, fmt.Errorf("db max open conns must be non-negative")
+	}
+	if opts.MaxIdleConns < 0 {
+		return OpenOptions{}, fmt.Errorf("db max idle conns must be non-negative")
+	}
+	if opts.ConnMaxIdleTime < 0 {
+		return OpenOptions{}, fmt.Errorf("db conn max idle time must be non-negative")
+	}
+	opts.JournalMode = strings.ToUpper(strings.TrimSpace(opts.JournalMode))
+	opts.Synchronous = strings.ToUpper(strings.TrimSpace(opts.Synchronous))
+	opts.AutoVacuum = strings.ToUpper(strings.TrimSpace(opts.AutoVacuum))
+	if !validSQLiteSetting(opts.JournalMode, "DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF") {
+		return OpenOptions{}, fmt.Errorf("invalid db journal mode %q", opts.JournalMode)
+	}
+	if !validSQLiteSetting(opts.Synchronous, "OFF", "NORMAL", "FULL", "EXTRA") {
+		return OpenOptions{}, fmt.Errorf("invalid db synchronous %q", opts.Synchronous)
+	}
+	if !validSQLiteSetting(opts.AutoVacuum, "NONE", "FULL", "INCREMENTAL") {
+		return OpenOptions{}, fmt.Errorf("invalid db auto vacuum %q", opts.AutoVacuum)
+	}
+	return opts, nil
+}
+
+func validSQLiteSetting(value string, allowed ...string) bool {
+	return slices.Contains(allowed, value)
+}
 
 // dbExecutor is an interface that both sql.DB and sql.Tx implement
 type dbExecutor interface {
@@ -210,13 +275,30 @@ func (sw *StreamingWriter) writeBatch(batch []indexing.IndexEntry) error {
 
 // Open creates (or reuses) a SQLite database and ensures the schema exists.
 func Open(path string) (*sql.DB, error) {
+	return OpenWithOptions(path, DefaultOpenOptions())
+}
+
+func OpenWithOptions(path string, opts OpenOptions) (*sql.DB, error) {
 	if path == "" {
 		path = defaultDBPath
 	}
+	if opts == (OpenOptions{}) {
+		opts = DefaultOpenOptions()
+	}
+	opts, err := NormalizeOpenOptions(opts)
+	if err != nil {
+		return nil, err
+	}
+
 	// Use WAL for concurrent readers while streaming writes happen.
-	// synchronous=OFF for maximum write performance during indexing
 	// auto_vacuum=INCREMENTAL to automatically reclaim space when deleting records
-	dsn := fmt.Sprintf("%s?_busy_timeout=%d&_foreign_keys=on&_journal_mode=WAL&_synchronous=OFF&_auto_vacuum=INCREMENTAL", path, busyTimeoutMS)
+	dsn := fmt.Sprintf("%s?_busy_timeout=%d&_foreign_keys=on&_journal_mode=%s&_synchronous=%s&_auto_vacuum=%s",
+		path,
+		int(opts.BusyTimeout/time.Millisecond),
+		opts.JournalMode,
+		opts.Synchronous,
+		opts.AutoVacuum,
+	)
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, err
@@ -226,7 +308,7 @@ func Open(path string) (*sql.DB, error) {
 	defer cancel()
 
 	var journalMode string
-	if err := db.QueryRowContext(ctx, `PRAGMA journal_mode=WAL;`).Scan(&journalMode); err != nil {
+	if err := db.QueryRowContext(ctx, `PRAGMA journal_mode = `+opts.JournalMode+`;`).Scan(&journalMode); err != nil {
 		if closeErr := db.Close(); closeErr != nil {
 			slog.Warn("failed to close DB after journal mode setup error", "err", closeErr)
 		}
@@ -235,10 +317,10 @@ func Open(path string) (*sql.DB, error) {
 
 	// Configure connection pool for WAL mode concurrent access
 	// WAL mode allows multiple readers + 1 writer simultaneously
-	db.SetMaxOpenConns(5)                  // Allow up to 5 concurrent connections
-	db.SetMaxIdleConns(2)                  // Keep 2 connections ready
-	db.SetConnMaxLifetime(0)               // Reuse connections indefinitely while active
-	db.SetConnMaxIdleTime(5 * time.Minute) // Close idle connections to release SQLite caches
+	db.SetMaxOpenConns(opts.MaxOpenConns)
+	db.SetMaxIdleConns(opts.MaxIdleConns)
+	db.SetConnMaxLifetime(0)
+	db.SetConnMaxIdleTime(opts.ConnMaxIdleTime)
 
 	if err := initSchema(ctx, db); err != nil {
 		if closeErr := db.Close(); closeErr != nil {

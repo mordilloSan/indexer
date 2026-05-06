@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/mordilloSan/indexer/indexing"
+	"github.com/mordilloSan/indexer/internal/configfile"
 	"github.com/mordilloSan/indexer/storage"
 )
 
@@ -31,23 +32,65 @@ type DaemonConfig struct {
 	FreshIndex           bool
 	KeepIndexes          int
 	DBPath               string
+	DBOptions            storage.OpenOptions
 	SocketPath           string
 	ListenAddr           string
 	Interval             time.Duration
+	ConfigPath           string
 }
 
 type daemon struct {
-	cfg             DaemonConfig
-	db              *sql.DB
-	store           *storage.Store
-	servers         []*http.Server
-	running         atomic.Bool
-	workStreamMu    sync.RWMutex
-	workStream      *workStreamBroadcaster
-	usedSystemdSock bool
+	cfg              DaemonConfig
+	cfgMu            sync.RWMutex
+	savedConfig      configfile.Config
+	configChanged    chan struct{}
+	activeSocketPath string
+	db               *sql.DB
+	store            *storage.Store
+	servers          []*http.Server
+	running          atomic.Bool
+	workStreamMu     sync.RWMutex
+	workStream       *workStreamBroadcaster
+	usedSystemdSock  bool
 }
 
 const databaseCheckTimeout = 30 * time.Second
+
+func DaemonConfigFromConfig(cfg configfile.Config, configPath string) (DaemonConfig, error) {
+	cfg, err := configfile.Normalize(cfg)
+	if err != nil {
+		return DaemonConfig{}, err
+	}
+	var daemonCfg DaemonConfig
+	if err := applyFileConfigFields(&daemonCfg, cfg); err != nil {
+		return DaemonConfig{}, err
+	}
+	daemonCfg.ConfigPath = configPath
+	return daemonCfg, nil
+}
+
+func applyFileConfigFields(dst *DaemonConfig, cfg configfile.Config) error {
+	interval, err := configfile.ParseInterval(cfg.Interval)
+	if err != nil {
+		return err
+	}
+	dbOptions, err := configfile.DBOpenOptions(cfg)
+	if err != nil {
+		return err
+	}
+	dst.IndexPath = cfg.IndexPath
+	dst.IndexName = cfg.IndexName
+	dst.IncludeHidden = cfg.IncludeHidden
+	dst.IncludeNetworkMounts = cfg.IncludeNetworkMounts
+	dst.FreshIndex = cfg.FreshIndex
+	dst.KeepIndexes = cfg.KeepIndexes
+	dst.DBPath = cfg.DBPath
+	dst.DBOptions = dbOptions
+	dst.SocketPath = cfg.SocketPath
+	dst.ListenAddr = cfg.ListenAddr
+	dst.Interval = interval
+	return nil
+}
 
 func NewDaemon(cfg DaemonConfig) (*daemon, error) {
 	if cfg.IndexPath == "" {
@@ -67,10 +110,16 @@ func NewDaemon(cfg DaemonConfig) (*daemon, error) {
 		cfg.SocketPath = "/var/run/indexer.sock"
 	}
 	if cfg.DBPath == "" {
-		cfg.DBPath = "/var/run/indexer.db"
+		cfg.DBPath = configfile.Defaults().DBPath
+	}
+	if cfg.DBOptions == (storage.OpenOptions{}) {
+		cfg.DBOptions = storage.DefaultOpenOptions()
+	}
+	if cfg.ConfigPath == "" {
+		cfg.ConfigPath = configfile.PathFromEnvOrDefault()
 	}
 
-	db, dbExisted, err := openDatabaseWithIntegrityCheck(cfg.DBPath)
+	db, dbExisted, err := openDatabaseWithIntegrityCheck(cfg.DBPath, cfg.DBOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -89,10 +138,21 @@ func NewDaemon(cfg DaemonConfig) (*daemon, error) {
 		logLatestIndexStatus(db)
 	}
 
+	savedConfig, err := daemonConfigToFileConfig(cfg)
+	if err != nil {
+		if closeErr := db.Close(); closeErr != nil {
+			slog.Warn("database close error after config normalization failure", "err", closeErr)
+		}
+		return nil, err
+	}
+
 	return &daemon{
-		cfg:   cfg,
-		db:    db,
-		store: storage.NewStoreWithDB(db, cfg.DBPath),
+		cfg:              cfg,
+		savedConfig:      savedConfig,
+		configChanged:    make(chan struct{}, 1),
+		activeSocketPath: cfg.SocketPath,
+		db:               db,
+		store:            storage.NewStoreWithDB(db, cfg.DBPath),
 	}, nil
 }
 
@@ -117,9 +177,13 @@ func (d *daemon) Close() {
 	}
 
 	// Remove Unix socket only if we created it (not systemd-managed)
-	if d.cfg.SocketPath != "" && !d.usedSystemdSock {
-		if err := os.Remove(d.cfg.SocketPath); err != nil && !os.IsNotExist(err) {
-			slog.Warn("failed to remove socket", "socket", d.cfg.SocketPath, "err", err)
+	activeSocketPath := d.activeSocketPath
+	if activeSocketPath == "" {
+		activeSocketPath = d.configSnapshot().SocketPath
+	}
+	if activeSocketPath != "" && !d.usedSystemdSock {
+		if err := os.Remove(activeSocketPath); err != nil && !os.IsNotExist(err) {
+			slog.Warn("failed to remove socket", "socket", activeSocketPath, "err", err)
 		}
 	}
 
@@ -128,6 +192,7 @@ func (d *daemon) Close() {
 
 // getUnixListener returns a Unix socket listener, preferring systemd socket activation
 func (d *daemon) getUnixListener() (net.Listener, error) {
+	cfg := d.configSnapshot()
 	// Try systemd socket activation first
 	if l := systemdUnixListener(); l != nil {
 		d.usedSystemdSock = true
@@ -136,18 +201,19 @@ func (d *daemon) getUnixListener() (net.Listener, error) {
 
 	// Fallback: create socket manually
 	d.usedSystemdSock = false
-	if err := os.Remove(d.cfg.SocketPath); err != nil && !os.IsNotExist(err) {
+	d.activeSocketPath = cfg.SocketPath
+	if err := os.Remove(cfg.SocketPath); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("remove stale socket: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(d.cfg.SocketPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(cfg.SocketPath), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir socket dir: %w", err)
 	}
 
-	l, err := net.Listen("unix", d.cfg.SocketPath)
+	l, err := net.Listen("unix", cfg.SocketPath)
 	if err != nil {
 		return nil, fmt.Errorf("listen on unix socket: %w", err)
 	}
-	if err := os.Chmod(d.cfg.SocketPath, 0o666); err != nil {
+	if err := os.Chmod(cfg.SocketPath, 0o660); err != nil {
 		if closeErr := l.Close(); closeErr != nil {
 			slog.Warn("failed to close listener after chmod error", "err", closeErr)
 		}
@@ -208,10 +274,7 @@ func systemdUnixListener() net.Listener {
 
 // Run starts the scheduler (if any) and HTTP server, blocks until context is cancelled
 func (d *daemon) Run(ctx context.Context) error {
-	// Start periodic indexing scheduler if configured
-	if d.cfg.Interval > 0 {
-		go d.startScheduler(ctx)
-	}
+	go d.startScheduler(ctx)
 	return d.startHTTP(ctx)
 }
 
@@ -259,7 +322,8 @@ func (d *daemon) needsInitialIndex(ctx context.Context) (bool, error) {
 
 	// Check if the index has ever been indexed (last_indexed is NULL or 0)
 	var lastIndexed sql.NullInt64
-	err = d.db.QueryRowContext(ctx, `SELECT last_indexed FROM indexes WHERE name = ? LIMIT 1`, d.cfg.IndexName).Scan(&lastIndexed)
+	cfg := d.configSnapshot()
+	err = d.db.QueryRowContext(ctx, `SELECT last_indexed FROM indexes WHERE name = ? LIMIT 1`, cfg.IndexName).Scan(&lastIndexed)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// Index with this name doesn't exist - needs indexing
@@ -273,21 +337,45 @@ func (d *daemon) needsInitialIndex(ctx context.Context) (bool, error) {
 }
 
 func (d *daemon) startScheduler(ctx context.Context) {
-	ticker := time.NewTicker(d.cfg.Interval)
-	defer ticker.Stop()
 	for {
+		interval := d.configSnapshot().Interval
+		if interval <= 0 {
+			select {
+			case <-d.configChanged:
+				continue
+			case <-ctx.Done():
+				return
+			}
+		}
+
+		timer := time.NewTimer(interval)
 		select {
-		case <-ticker.C:
+		case <-timer.C:
 			if err := d.runIndexOnce(ctx); err != nil {
 				slog.Error("scheduled index failed", "err", err)
 			}
+		case <-d.configChanged:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			continue
 		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 			return
 		}
 	}
 }
 
 func (d *daemon) startHTTP(ctx context.Context) error {
+	cfg := d.configSnapshot()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/openapi.json", serveOpenapi)
 	mux.HandleFunc("/index", d.handleIndex)
@@ -310,19 +398,19 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 	serverCount := 0
 
 	// Unix socket listener - try systemd socket activation first
-	if d.cfg.SocketPath != "" {
+	if cfg.SocketPath != "" {
 		l, err := d.getUnixListener()
 		if err != nil {
 			return err
 		}
 
-		srv := &http.Server{Handler: handler, ErrorLog: errorLog, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second}
+		srv := &http.Server{Handler: handler, ErrorLog: errorLog, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, ConnContext: unixConnContext}
 		d.servers = append(d.servers, srv)
 		serverCount++
 		if d.usedSystemdSock {
-			slog.Info("API listening", "addr", "unix://"+d.cfg.SocketPath, "systemd_socket_activation", true)
+			slog.Info("API listening", "addr", "unix://"+cfg.SocketPath, "systemd_socket_activation", true)
 		} else {
-			slog.Info("API listening", "addr", "unix://"+d.cfg.SocketPath)
+			slog.Info("API listening", "addr", "unix://"+cfg.SocketPath)
 		}
 		go func() {
 			errCh <- srv.Serve(l)
@@ -330,11 +418,11 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 	}
 
 	// Optional TCP listener
-	if d.cfg.ListenAddr != "" {
-		tcpSrv := &http.Server{Addr: d.cfg.ListenAddr, Handler: handler, ErrorLog: errorLog, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second}
+	if cfg.ListenAddr != "" {
+		tcpSrv := &http.Server{Addr: cfg.ListenAddr, Handler: handler, ErrorLog: errorLog, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, ConnContext: tcpConnContext}
 		d.servers = append(d.servers, tcpSrv)
 		serverCount++
-		slog.Info("API listening", "addr", "http://localhost"+d.cfg.ListenAddr)
+		slog.Info("API listening", "addr", "http://localhost"+cfg.ListenAddr)
 		go func() {
 			errCh <- tcpSrv.ListenAndServe()
 		}()
@@ -414,23 +502,25 @@ func (d *daemon) runIndexSubprocess(ctx context.Context) error {
 	if indexerSpawnOverride != nil {
 		return indexerSpawnOverride(d, ctx)
 	}
+	cfg := d.configSnapshot()
 	// Build args for the index binary
 	args := []string{
 		"--index-mode",
-		"--path", d.cfg.IndexPath,
-		"--name", d.cfg.IndexName,
-		"--db-path", d.cfg.DBPath,
+		"--path", cfg.IndexPath,
+		"--name", cfg.IndexName,
+		"--db-path", cfg.DBPath,
 	}
-	if d.cfg.IncludeHidden {
+	if cfg.IncludeHidden {
 		args = append(args, "--include-hidden")
 	}
-	if d.cfg.IncludeNetworkMounts {
+	if cfg.IncludeNetworkMounts {
 		args = append(args, "--include-network-mounts")
 	}
-	args = append(args, "--fresh="+strconv.FormatBool(d.cfg.FreshIndex))
-	if d.cfg.KeepIndexes > 0 {
-		args = append(args, "--keep-indexes", strconv.Itoa(d.cfg.KeepIndexes))
+	args = append(args, "--fresh="+strconv.FormatBool(cfg.FreshIndex))
+	if cfg.KeepIndexes > 0 {
+		args = append(args, "--keep-indexes", strconv.Itoa(cfg.KeepIndexes))
 	}
+	args = appendDBOptionArgs(args, cfg.DBOptions)
 
 	// Use systemd-run to spawn in a separate cgroup/scope
 	// This ensures proper memory accounting - the daemon's cgroup won't include subprocess memory
@@ -469,7 +559,7 @@ func (d *daemon) runIndexSubprocess(ctx context.Context) error {
 
 // RunIndexMode is called from main when -index-mode flag is set.
 // It performs the index and returns when complete.
-func RunIndexMode(indexName, indexPath string, includeHidden, includeNetworkMounts, fresh bool, dbPath string, keepIndexes int) error {
+func RunIndexMode(indexName, indexPath string, includeHidden, includeNetworkMounts, fresh bool, dbPath string, keepIndexes int, dbOptions storage.OpenOptions) error {
 	slog.Info("running in index mode",
 		"path", indexPath,
 		"name", indexName,
@@ -480,7 +570,7 @@ func RunIndexMode(indexName, indexPath string, includeHidden, includeNetworkMoun
 		"keep_indexes", keepIndexes,
 	)
 
-	db, _, err := openDatabaseWithIntegrityCheck(dbPath)
+	db, _, err := openDatabaseWithIntegrityCheck(dbPath, dbOptions)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -666,7 +756,7 @@ func prepareIndexRecord(ctx context.Context, db *sql.DB, indexName, indexPath st
 // openDatabaseWithIntegrityCheck opens a database and checks for corruption.
 // If corrupted, it automatically removes and recreates the database.
 // Returns the opened database connection and whether it existed before.
-func openDatabaseWithIntegrityCheck(dbPath string) (*sql.DB, bool, error) {
+func openDatabaseWithIntegrityCheck(dbPath string, dbOptions storage.OpenOptions) (*sql.DB, bool, error) {
 	dbExisted := fileExists(dbPath)
 	if dbExisted {
 		slog.Info("database exists; checking integrity", "db", dbPath)
@@ -674,7 +764,7 @@ func openDatabaseWithIntegrityCheck(dbPath string) (*sql.DB, bool, error) {
 		slog.Info("database not found; creating new", "db", dbPath)
 	}
 
-	db, err := storage.Open(dbPath)
+	db, err := storage.OpenWithOptions(dbPath, dbOptions)
 	if err != nil {
 		return nil, false, err
 	}
@@ -684,7 +774,7 @@ func openDatabaseWithIntegrityCheck(dbPath string) (*sql.DB, bool, error) {
 	}
 
 	if err := checkDatabaseIntegrityWithTimeout(db); err != nil {
-		return recreateDatabaseAfterIntegrityFailure(dbPath, db, err)
+		return recreateDatabaseAfterIntegrityFailure(dbPath, dbOptions, db, err)
 	}
 
 	slog.Info("database integrity check passed")
@@ -697,7 +787,7 @@ func checkDatabaseIntegrityWithTimeout(db *sql.DB) error {
 	return checkDatabaseIntegrity(ctx, db)
 }
 
-func recreateDatabaseAfterIntegrityFailure(dbPath string, db *sql.DB, integrityErr error) (*sql.DB, bool, error) {
+func recreateDatabaseAfterIntegrityFailure(dbPath string, dbOptions storage.OpenOptions, db *sql.DB, integrityErr error) (*sql.DB, bool, error) {
 	if errors.Is(integrityErr, context.Canceled) || errors.Is(integrityErr, context.DeadlineExceeded) {
 		if closeErr := db.Close(); closeErr != nil {
 			slog.Warn("failed to close database after interrupted integrity check", "err", closeErr)
@@ -714,7 +804,7 @@ func recreateDatabaseAfterIntegrityFailure(dbPath string, db *sql.DB, integrityE
 		return nil, false, err
 	}
 
-	db, err := storage.Open(dbPath)
+	db, err := storage.OpenWithOptions(dbPath, dbOptions)
 	if err != nil {
 		return nil, false, err
 	}

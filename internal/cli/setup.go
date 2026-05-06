@@ -5,25 +5,17 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/mordilloSan/indexer/internal/configfile"
 )
 
 type setupConfig struct {
-	IndexPath            string
-	IndexName            string
-	IncludeHidden        bool
-	IncludeNetworkMounts bool
-	FreshIndex           bool
-	KeepIndexes          int
-	DBPath               string
-	SocketPath           string
-	Interval             string
-	ListenAddr           string
-	ListenFlag           string
+	configfile.Config
+	ListenFlag string
 }
 
 type setupField struct {
@@ -111,6 +103,83 @@ var setupFields = []setupField{
 		},
 	},
 	{
+		Label: "SQLite busy timeout",
+		Value: func(cfg setupConfig) string {
+			return cfg.DBBusyTimeout
+		},
+		Prompt: func(reader *bufio.Reader, w io.Writer, cfg setupConfig) (setupConfig, error) {
+			var err error
+			cfg.DBBusyTimeout, err = promptInterval(reader, w, "SQLite busy timeout", cfg.DBBusyTimeout)
+			return cfg, err
+		},
+	},
+	{
+		Label: "SQLite journal mode",
+		Value: func(cfg setupConfig) string {
+			return cfg.DBJournalMode
+		},
+		Prompt: func(reader *bufio.Reader, w io.Writer, cfg setupConfig) (setupConfig, error) {
+			var err error
+			cfg.DBJournalMode, err = promptRequiredString(reader, w, "SQLite journal mode", cfg.DBJournalMode)
+			return cfg, err
+		},
+	},
+	{
+		Label: "SQLite synchronous",
+		Value: func(cfg setupConfig) string {
+			return cfg.DBSynchronous
+		},
+		Prompt: func(reader *bufio.Reader, w io.Writer, cfg setupConfig) (setupConfig, error) {
+			var err error
+			cfg.DBSynchronous, err = promptRequiredString(reader, w, "SQLite synchronous", cfg.DBSynchronous)
+			return cfg, err
+		},
+	},
+	{
+		Label: "SQLite auto vacuum",
+		Value: func(cfg setupConfig) string {
+			return cfg.DBAutoVacuum
+		},
+		Prompt: func(reader *bufio.Reader, w io.Writer, cfg setupConfig) (setupConfig, error) {
+			var err error
+			cfg.DBAutoVacuum, err = promptRequiredString(reader, w, "SQLite auto vacuum", cfg.DBAutoVacuum)
+			return cfg, err
+		},
+	},
+	{
+		Label: "SQLite max open connections",
+		Value: func(cfg setupConfig) string {
+			return strconv.Itoa(cfg.DBMaxOpenConns)
+		},
+		Prompt: func(reader *bufio.Reader, w io.Writer, cfg setupConfig) (setupConfig, error) {
+			var err error
+			cfg.DBMaxOpenConns, err = promptNonNegativeInt(reader, w, "SQLite max open connections", cfg.DBMaxOpenConns)
+			return cfg, err
+		},
+	},
+	{
+		Label: "SQLite max idle connections",
+		Value: func(cfg setupConfig) string {
+			return strconv.Itoa(cfg.DBMaxIdleConns)
+		},
+		Prompt: func(reader *bufio.Reader, w io.Writer, cfg setupConfig) (setupConfig, error) {
+			var err error
+			cfg.DBMaxIdleConns, err = promptNonNegativeInt(reader, w, "SQLite max idle connections", cfg.DBMaxIdleConns)
+			return cfg, err
+		},
+	},
+	{
+		Label: "SQLite connection max idle time",
+		Value: func(cfg setupConfig) string {
+			return cfg.DBConnMaxIdleTime
+		},
+		Prompt: func(reader *bufio.Reader, w io.Writer, cfg setupConfig) (setupConfig, error) {
+			var err error
+			cfg.DBConnMaxIdleTime, err = promptInterval(reader, w, "SQLite connection max idle time", cfg.DBConnMaxIdleTime)
+			return cfg, err
+		},
+	},
+	{
 		Label: "Unix socket path",
 		Value: func(cfg setupConfig) string {
 			return displayOptional(cfg.SocketPath, "disabled")
@@ -147,9 +216,9 @@ var setupFields = []setupField{
 
 func runSetup(args []string) {
 	fs := flag.NewFlagSet("setup", flag.ExitOnError)
-	envFile := fs.String("env-file", defaultEnvFile, "Environment file to update")
+	configPath := fs.String("config-file", configfile.PathFromEnvOrDefault(), "JSON config file to update")
 	noRestart := fs.Bool("no-restart", false, "Skip service restart after updating")
-	dryRun := fs.Bool("dry-run", false, "Print the resulting environment file without writing or restarting")
+	dryRun := fs.Bool("dry-run", false, "Print the resulting config file without writing or restarting")
 	service := fs.String("service", defaultServiceName, "Systemd service name")
 	socketPath := fs.String("socket-path", "/var/run/indexer.sock", "Unix socket path for reading current daemon config")
 	listenAddr := fs.String("listen", "", "TCP address for reading current daemon config (e.g. :8080)")
@@ -157,7 +226,7 @@ func runSetup(args []string) {
 		os.Exit(1)
 	}
 
-	cfg, source, env, err := loadSetupConfig(*envFile, *socketPath, *listenAddr)
+	cfg, source, err := loadSetupConfig(*configPath, *socketPath, *listenAddr)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
@@ -180,20 +249,24 @@ func runSetup(args []string) {
 		return
 	}
 
-	maps.Copy(env, setupConfigToEnv(cfg))
+	fileCfg, err := setupConfigToFileConfig(cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
 	if *dryRun {
-		if err := printEnvDryRun(*envFile, env); err != nil {
-			fmt.Fprintf(os.Stderr, "format %s: %v\n", *envFile, err)
+		if err := printConfigDryRun(*configPath, fileCfg); err != nil {
+			fmt.Fprintf(os.Stderr, "format %s: %v\n", *configPath, err)
 			os.Exit(1)
 		}
 		return
 	}
 
-	if err := writeEnvFile(*envFile, env); err != nil {
-		fmt.Fprintf(os.Stderr, "write %s: %v\n", *envFile, err)
+	if err := configfile.Save(*configPath, fileCfg); err != nil {
+		fmt.Fprintf(os.Stderr, "write %s: %v\n", *configPath, err)
 		os.Exit(1)
 	}
-	fmt.Printf("updated %s\n", *envFile)
+	fmt.Printf("updated %s\n", *configPath)
 
 	if !*noRestart {
 		fmt.Printf("restarting %s...\n", *service)
@@ -206,82 +279,142 @@ func runSetup(args []string) {
 	}
 }
 
-func loadSetupConfig(envFile, socketPath, listenAddr string) (setupConfig, string, map[string]string, error) {
+func loadSetupConfig(configPath, socketPath, listenAddr string) (setupConfig, string, error) {
 	cfg := defaultSetupConfig()
 	source := "built-in defaults"
-	env := map[string]string{}
 
-	fileEnv, err := readEnvFile(envFile)
-	if err == nil {
-		env = fileEnv
-		cfg = setupConfigFromEnv(fileEnv)
-		source = envFile
+	fileCfg, err := configfile.Load(configPath)
+	if err != nil {
+		return cfg, "", fmt.Errorf("read %s: %w", configPath, err)
+	}
+	if _, err := os.Stat(configPath); err == nil {
+		cfg = setupConfigFromFileConfig(fileCfg)
+		source = configPath
 	} else if !os.IsNotExist(err) {
-		return cfg, "", nil, fmt.Errorf("read %s: %w", envFile, err)
+		return cfg, "", fmt.Errorf("stat %s: %w", configPath, err)
 	}
 
 	daemonCfg, err := queryDaemonSetupConfig(socketPath, listenAddr)
 	if err == nil {
-		return daemonCfg, "running daemon", env, nil
+		return daemonCfg, "running daemon", nil
 	}
 	if source == "built-in defaults" {
 		source = "built-in defaults (daemon not reachable)"
 	} else {
 		source = fmt.Sprintf("%s (daemon not reachable)", source)
 	}
-	return cfg, source, env, nil
+	return cfg, source, nil
 }
 
 func defaultSetupConfig() setupConfig {
-	return setupConfig{
-		IndexPath:            "/",
-		IndexName:            "root",
-		IncludeHidden:        true,
-		IncludeNetworkMounts: false,
-		FreshIndex:           true,
-		KeepIndexes:          0,
-		DBPath:               "/tmp/indexer.db",
-		SocketPath:           "/var/run/indexer.sock",
-		Interval:             "1h",
-		ListenAddr:           "",
+	return setupConfigFromFileConfig(configfile.Defaults())
+}
+
+func setupConfigFromFileConfig(cfg configfile.Config) setupConfig {
+	interval := cfg.Interval
+	if interval == "0s" {
+		interval = "0"
 	}
+	cfg.Interval = interval
+	return setupConfig{Config: cfg}
+}
+
+func setupConfigToFileConfig(cfg setupConfig) (configfile.Config, error) {
+	return configfile.Normalize(cfg.Config)
 }
 
 func setupConfigFromEnv(env map[string]string) setupConfig {
 	cfg := defaultSetupConfig()
-	if v, ok := env["INDEXER_PATH"]; ok {
-		cfg.IndexPath = v
+	applySetupStringEnv(&cfg, env)
+	applySetupBoolEnv(&cfg, env)
+	applySetupIntEnv(&cfg, env)
+	applySetupListenEnv(&cfg, env)
+	return cfg
+}
+
+type setupStringEnv struct {
+	key string
+	set func(*setupConfig, string)
+}
+
+func applySetupStringEnv(cfg *setupConfig, env map[string]string) {
+	overrides := []setupStringEnv{
+		{"INDEXER_PATH", func(c *setupConfig, v string) { c.IndexPath = v }},
+		{"INDEXER_NAME", func(c *setupConfig, v string) { c.IndexName = v }},
+		{"INDEXER_DB_PATH", func(c *setupConfig, v string) { c.DBPath = v }},
+		{"INDEXER_DB_BUSY_TIMEOUT", func(c *setupConfig, v string) { c.DBBusyTimeout = v }},
+		{"INDEXER_DB_JOURNAL_MODE", func(c *setupConfig, v string) { c.DBJournalMode = v }},
+		{"INDEXER_DB_SYNCHRONOUS", func(c *setupConfig, v string) { c.DBSynchronous = v }},
+		{"INDEXER_DB_AUTO_VACUUM", func(c *setupConfig, v string) { c.DBAutoVacuum = v }},
+		{"INDEXER_DB_CONN_MAX_IDLE_TIME", func(c *setupConfig, v string) { c.DBConnMaxIdleTime = v }},
+		{"INDEXER_SOCKET", func(c *setupConfig, v string) { c.SocketPath = v }},
+		{"INDEXER_INTERVAL", func(c *setupConfig, v string) { c.Interval = v }},
 	}
-	if v, ok := env["INDEXER_NAME"]; ok {
-		cfg.IndexName = v
-	}
-	if v, ok := env["INDEXER_INCLUDE_HIDDEN"]; ok {
-		cfg.IncludeHidden = parseBoolWithFallback(v, cfg.IncludeHidden)
-	}
-	if v, ok := env["INDEXER_INCLUDE_NETWORK_MOUNTS"]; ok {
-		cfg.IncludeNetworkMounts = parseBoolWithFallback(v, cfg.IncludeNetworkMounts)
-	}
-	if v, ok := env["INDEXER_FRESH"]; ok {
-		cfg.FreshIndex = parseBoolWithFallback(v, cfg.FreshIndex)
-	}
-	if v, ok := env["INDEXER_KEEP_INDEXES"]; ok {
-		if parsed, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && parsed >= 0 {
-			cfg.KeepIndexes = parsed
+	for _, override := range overrides {
+		if value, ok := env[override.key]; ok {
+			override.set(cfg, value)
 		}
 	}
-	if v, ok := env["INDEXER_DB_PATH"]; ok {
-		cfg.DBPath = v
+}
+
+type setupBoolEnv struct {
+	key string
+	set func(*setupConfig, bool)
+}
+
+func applySetupBoolEnv(cfg *setupConfig, env map[string]string) {
+	overrides := []setupBoolEnv{
+		{"INDEXER_INCLUDE_HIDDEN", func(c *setupConfig, v bool) { c.IncludeHidden = v }},
+		{"INDEXER_INCLUDE_NETWORK_MOUNTS", func(c *setupConfig, v bool) { c.IncludeNetworkMounts = v }},
+		{"INDEXER_FRESH", func(c *setupConfig, v bool) { c.FreshIndex = v }},
 	}
-	if v, ok := env["INDEXER_SOCKET"]; ok {
-		cfg.SocketPath = v
+	for _, override := range overrides {
+		if value, ok := env[override.key]; ok {
+			override.set(cfg, parseBoolWithFallback(value, currentSetupBool(cfg, override.key)))
+		}
 	}
-	if v, ok := env["INDEXER_INTERVAL"]; ok {
-		cfg.Interval = v
+}
+
+func currentSetupBool(cfg *setupConfig, key string) bool {
+	switch key {
+	case "INDEXER_INCLUDE_HIDDEN":
+		return cfg.IncludeHidden
+	case "INDEXER_INCLUDE_NETWORK_MOUNTS":
+		return cfg.IncludeNetworkMounts
+	case "INDEXER_FRESH":
+		return cfg.FreshIndex
+	default:
+		return false
 	}
-	if v, ok := env["INDEXER_LISTEN_FLAG"]; ok {
-		cfg.ListenAddr, cfg.ListenFlag = splitListenFlag(v)
+}
+
+type setupIntEnv struct {
+	key string
+	set func(*setupConfig, int)
+}
+
+func applySetupIntEnv(cfg *setupConfig, env map[string]string) {
+	overrides := []setupIntEnv{
+		{"INDEXER_KEEP_INDEXES", func(c *setupConfig, v int) { c.KeepIndexes = v }},
+		{"INDEXER_DB_MAX_OPEN_CONNS", func(c *setupConfig, v int) { c.DBMaxOpenConns = v }},
+		{"INDEXER_DB_MAX_IDLE_CONNS", func(c *setupConfig, v int) { c.DBMaxIdleConns = v }},
 	}
-	return cfg
+	for _, override := range overrides {
+		if parsed, ok := parseSetupNonNegativeInt(env[override.key]); ok {
+			override.set(cfg, parsed)
+		}
+	}
+}
+
+func parseSetupNonNegativeInt(raw string) (int, bool) {
+	parsed, err := strconv.Atoi(strings.TrimSpace(raw))
+	return parsed, err == nil && parsed >= 0
+}
+
+func applySetupListenEnv(cfg *setupConfig, env map[string]string) {
+	if value, ok := env["INDEXER_LISTEN_FLAG"]; ok {
+		cfg.ListenAddr, cfg.ListenFlag = splitListenFlag(value)
+	}
 }
 
 func setupConfigToEnv(cfg setupConfig) map[string]string {
@@ -297,6 +430,13 @@ func setupConfigToEnv(cfg setupConfig) map[string]string {
 		"INDEXER_FRESH":                  strconv.FormatBool(cfg.FreshIndex),
 		"INDEXER_KEEP_INDEXES":           strconv.Itoa(cfg.KeepIndexes),
 		"INDEXER_DB_PATH":                cfg.DBPath,
+		"INDEXER_DB_BUSY_TIMEOUT":        cfg.DBBusyTimeout,
+		"INDEXER_DB_JOURNAL_MODE":        cfg.DBJournalMode,
+		"INDEXER_DB_SYNCHRONOUS":         cfg.DBSynchronous,
+		"INDEXER_DB_AUTO_VACUUM":         cfg.DBAutoVacuum,
+		"INDEXER_DB_MAX_OPEN_CONNS":      strconv.Itoa(cfg.DBMaxOpenConns),
+		"INDEXER_DB_MAX_IDLE_CONNS":      strconv.Itoa(cfg.DBMaxIdleConns),
+		"INDEXER_DB_CONN_MAX_IDLE_TIME":  cfg.DBConnMaxIdleTime,
 		"INDEXER_SOCKET":                 cfg.SocketPath,
 		"INDEXER_INTERVAL":               cfg.Interval,
 		"INDEXER_LISTEN_FLAG":            listenFlag,

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/mordilloSan/indexer/indexing"
+	"github.com/mordilloSan/indexer/internal/configfile"
 	"github.com/mordilloSan/indexer/storage"
 )
 
@@ -569,30 +571,57 @@ func (d *daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *daemon) handleConfig(w http.ResponseWriter, r *http.Request) {
-	resp := struct {
-		IndexName            string `json:"index_name"`
-		IndexPath            string `json:"index_path"`
-		IncludeHidden        bool   `json:"include_hidden"`
-		IncludeNetworkMounts bool   `json:"include_network_mounts"`
-		FreshIndex           bool   `json:"fresh_index"`
-		KeepIndexes          int    `json:"keep_indexes"`
-		DBPath               string `json:"db_path"`
-		SocketPath           string `json:"socket_path"`
-		ListenAddr           string `json:"listen_addr"`
-		Interval             string `json:"interval"`
-	}{
-		IndexName:            d.cfg.IndexName,
-		IndexPath:            d.cfg.IndexPath,
-		IncludeHidden:        d.cfg.IncludeHidden,
-		IncludeNetworkMounts: d.cfg.IncludeNetworkMounts,
-		FreshIndex:           d.cfg.FreshIndex,
-		KeepIndexes:          d.cfg.KeepIndexes,
-		DBPath:               d.cfg.DBPath,
-		SocketPath:           d.cfg.SocketPath,
-		ListenAddr:           d.cfg.ListenAddr,
-		Interval:             d.cfg.Interval.String(),
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, d.savedConfigSnapshot())
+	case http.MethodPut:
+		d.handleConfigPut(w, r)
+	default:
+		w.Header().Set("Allow", "GET, PUT")
+		http.Error(w, "use GET or PUT", http.StatusMethodNotAllowed)
 	}
-	writeJSON(w, resp)
+}
+
+func (d *daemon) handleConfigPut(w http.ResponseWriter, r *http.Request) {
+	if !requestFromUnixSocket(r) {
+		http.Error(w, "config writes require the Unix socket", http.StatusForbidden)
+		return
+	}
+	if d.running.Load() {
+		http.Error(w, "indexer already running", http.StatusConflict)
+		return
+	}
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("read body: %v", err), http.StatusBadRequest)
+		return
+	}
+	patch, err := configfile.DecodePatch(body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("invalid config JSON: %v", err), http.StatusBadRequest)
+		return
+	}
+	next, err := configfile.ApplyPatch(d.savedConfigSnapshot(), patch)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	configPath := d.configSnapshot().ConfigPath
+	if err := configfile.Save(configPath, next); err != nil {
+		http.Error(w, fmt.Sprintf("write config file: %v", err), http.StatusInternalServerError)
+		return
+	}
+	restartRequired, err := d.applySavedConfig(next)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if restartRequired {
+		w.Header().Set("X-Indexer-Restart-Required", "true")
+	}
+	writeJSON(w, next)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -654,6 +683,6 @@ const openapiSpec = `{
     "/entries": { "get": { "summary": "List entries (returns type: folder/file)", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"} }, { "in": "query", "name": "recursive", "schema": {"type": "boolean"} }, { "in": "query", "name": "limit", "schema": {"type": "integer"} }, { "in": "query", "name": "offset", "schema": {"type": "integer"} }], "responses": { "200": {"description": "Entries with type field indicating folder or file"} } } },
     "/add": { "post": { "summary": "Upsert entry", "responses": { "200": {"description": "OK"} } } },
     "/delete": { "delete": { "summary": "Delete entry", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"} }], "responses": { "200": {"description": "OK"} } } },
-    "/config": { "get": { "summary": "Get daemon configuration", "responses": { "200": {"description": "Configuration JSON"} } } }
+    "/config": { "get": { "summary": "Get persisted daemon configuration", "responses": { "200": {"description": "Configuration JSON"} } }, "put": { "summary": "Update persisted daemon configuration over the Unix socket", "responses": { "200": {"description": "Configuration JSON"}, "403": {"description": "Unix socket required"}, "409": {"description": "Indexer running"} } } }
   }
 }`

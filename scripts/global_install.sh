@@ -139,23 +139,33 @@ echo -e "${GREEN}✓${NC} Systemd files installed"
 
 mkdir -p /var/lib/indexer
 chmod 0755 /var/lib/indexer
+mkdir -p /etc/indexer
+chmod 0755 /etc/indexer
 
-if [[ ! -f /etc/default/indexer ]]; then
-  echo -e "${YELLOW}Creating /etc/default/indexer with defaults...${NC}"
-  cat >/etc/default/indexer <<'EOF'
-# Environment for indexer.service
-INDEXER_PATH=/
-INDEXER_NAME=root
-INDEXER_INCLUDE_HIDDEN=true
-INDEXER_INCLUDE_NETWORK_MOUNTS=false
-INDEXER_FRESH=true
-INDEXER_KEEP_INDEXES=0
-INDEXER_SOCKET=/var/run/indexer.sock
-INDEXER_DB_PATH=/tmp/indexer.db
-INDEXER_INTERVAL=1h
-INDEXER_LISTEN_FLAG=
+if [[ ! -f /etc/indexer/config.json ]]; then
+  echo -e "${YELLOW}Creating /etc/indexer/config.json with defaults...${NC}"
+  cat >/etc/indexer/config.json <<'EOF'
+{
+  "index_path": "/",
+  "index_name": "root",
+  "include_hidden": true,
+  "include_network_mounts": false,
+  "fresh_index": true,
+  "keep_indexes": 0,
+  "db_path": "/tmp/indexer.db",
+  "db_busy_timeout": "5s",
+  "db_journal_mode": "WAL",
+  "db_synchronous": "OFF",
+  "db_auto_vacuum": "INCREMENTAL",
+  "db_max_open_conns": 5,
+  "db_max_idle_conns": 2,
+  "db_conn_max_idle_time": "5m0s",
+  "socket_path": "/var/run/indexer.sock",
+  "listen_addr": "",
+  "interval": "1h0m0s"
+}
 EOF
-  echo -e "${GREEN}✓${NC} /etc/default/indexer created (edit to suit your system)"
+  echo -e "${GREEN}✓${NC} /etc/indexer/config.json created (edit to suit your system)"
 fi
 
 echo -e "${YELLOW}[4/5]${NC} Enabling systemd socket and service..."
@@ -187,7 +197,7 @@ echo -e "\n${GREEN}Installation completed successfully!${NC}\n"
 
 echo -e "${YELLOW}Usage:${NC}"
 echo "  Edit configuration:"
-echo "    sudo nano /etc/default/indexer   # set INDEXER_PATH, INDEXER_INTERVAL, etc."
+echo "    sudo nano /etc/indexer/config.json"
 echo ""
 echo "  Restart daemon with new settings:"
 echo "    sudo systemctl restart indexer.service"
@@ -200,5 +210,5 @@ echo "  View logs:"
 echo "    sudo journalctl -u indexer.service -f"
 echo ""
 echo "  Manual index (via HTTP API):"
-echo "    curl -X POST --unix-socket /var/run/indexer.sock http://localhost/index"
+echo "    sudo curl -X POST --unix-socket /var/run/indexer.sock http://localhost/index"
 echo ""

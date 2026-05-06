@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/mordilloSan/indexer/cmd"
+	"github.com/mordilloSan/indexer/internal/configfile"
 	"github.com/mordilloSan/indexer/internal/version"
 	"github.com/mordilloSan/indexer/logging"
 )
@@ -27,6 +28,14 @@ func runIndexCommand(flagSetName string, args []string) {
 	freshIndex := fs.Bool("fresh", true, "Fresh index mode")
 	keepIndexes := fs.Int("keep-indexes", 0, "Most recent index records to keep after indexing (0 disables automatic pruning)")
 	dbPath := fs.String("db-path", "", "SQLite database path")
+	defaultCfg := configfile.Defaults()
+	dbBusyTimeout := fs.String("db-busy-timeout", defaultCfg.DBBusyTimeout, "SQLite busy timeout")
+	dbJournalMode := fs.String("db-journal-mode", defaultCfg.DBJournalMode, "SQLite journal mode")
+	dbSynchronous := fs.String("db-synchronous", defaultCfg.DBSynchronous, "SQLite synchronous setting")
+	dbAutoVacuum := fs.String("db-auto-vacuum", defaultCfg.DBAutoVacuum, "SQLite auto_vacuum setting")
+	dbMaxOpenConns := fs.Int("db-max-open-conns", defaultCfg.DBMaxOpenConns, "SQLite max open connections")
+	dbMaxIdleConns := fs.Int("db-max-idle-conns", defaultCfg.DBMaxIdleConns, "SQLite max idle connections")
+	dbConnMaxIdleTime := fs.String("db-conn-max-idle-time", defaultCfg.DBConnMaxIdleTime, "SQLite connection max idle time")
 	cpuProfile := fs.String("cpu-profile", "", "Write CPU profile to file")
 	verbose := fs.Bool("verbose", false, "Enable verbose logging")
 	if err := fs.Parse(args); err != nil {
@@ -50,9 +59,32 @@ func runIndexCommand(flagSetName string, args []string) {
 		KeepIndexes:          *keepIndexes,
 	}
 	applyIndexEnvOverrides(fs, &indexOpts)
+	dbConfig, err := configfile.Normalize(configfile.Config{
+		IndexPath:         "/",
+		IndexName:         "root",
+		DBPath:            dbVal,
+		DBBusyTimeout:     *dbBusyTimeout,
+		DBJournalMode:     *dbJournalMode,
+		DBSynchronous:     *dbSynchronous,
+		DBAutoVacuum:      *dbAutoVacuum,
+		DBMaxOpenConns:    *dbMaxOpenConns,
+		DBMaxIdleConns:    *dbMaxIdleConns,
+		DBConnMaxIdleTime: *dbConnMaxIdleTime,
+		SocketPath:        "/var/run/indexer.sock",
+		Interval:          "0",
+	})
+	if err != nil {
+		slog.Error("invalid database options", "err", err)
+		os.Exit(1)
+	}
+	dbOptions, err := configfile.DBOpenOptions(dbConfig)
+	if err != nil {
+		slog.Error("invalid database options", "err", err)
+		os.Exit(1)
+	}
 
 	if err := withCPUProfile(*cpuProfile, func() error {
-		return cmd.RunIndexMode(nameVal, *indexPath, *includeHidden, indexOpts.IncludeNetworkMounts, indexOpts.FreshIndex, dbVal, indexOpts.KeepIndexes)
+		return cmd.RunIndexMode(nameVal, *indexPath, *includeHidden, indexOpts.IncludeNetworkMounts, indexOpts.FreshIndex, dbVal, indexOpts.KeepIndexes, dbOptions)
 	}); err != nil {
 		slog.Error("index failed", "err", err)
 		os.Exit(1)

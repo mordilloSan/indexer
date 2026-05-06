@@ -296,12 +296,13 @@ func (d *daemon) reindexPathWithProgress(ctx context.Context, relativePath strin
 		return
 	}
 
+	cfg := d.configSnapshot()
 	index := indexing.Initialize(
-		d.cfg.IndexName,
-		d.cfg.IndexPath,
-		d.cfg.IndexPath,
-		d.cfg.IncludeHidden,
-		indexing.WithNetworkMounts(d.cfg.IncludeNetworkMounts),
+		cfg.IndexName,
+		cfg.IndexPath,
+		cfg.IndexPath,
+		cfg.IncludeHidden,
+		indexing.WithNetworkMounts(cfg.IncludeNetworkMounts),
 	)
 	writer := storage.NewStreamingWriterWithProgress(ctx, d.db, indexID, 1000, func(filesWritten, dirsWritten int64, lastPath string) {
 		if (filesWritten+dirsWritten)%100 == 0 {

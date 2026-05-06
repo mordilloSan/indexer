@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/mordilloSan/indexer/internal/configfile"
 )
 
 func TestEnvFileQuotesAndReadsValuesWithSpaces(t *testing.T) {
@@ -246,16 +248,19 @@ func TestSetupConfigPreservesUnknownListenFlag(t *testing.T) {
 	}
 }
 
-func TestValidateConfigUpdatesRejectsUnsafeServiceValues(t *testing.T) {
-	tests := []map[string]string{
-		{"INDEXER_PATH": ""},
-		{"INDEXER_SOCKET": ""},
-		{"INDEXER_INTERVAL": "daily"},
-		{"INDEXER_KEEP_INDEXES": "-1"},
+func TestConfigPatchValidationRejectsUnsafeValues(t *testing.T) {
+	empty := ""
+	badInterval := "daily"
+	negative := -1
+	tests := []configfile.Patch{
+		{IndexPath: &empty},
+		{DBPath: &empty},
+		{Interval: &badInterval},
+		{KeepIndexes: &negative},
 	}
-	for _, updates := range tests {
-		if err := validateConfigUpdates(updates); err == nil {
-			t.Fatalf("validateConfigUpdates(%v) returned nil", updates)
+	for _, patch := range tests {
+		if _, err := configfile.ApplyPatch(configfile.Defaults(), patch); err == nil {
+			t.Fatalf("ApplyPatch(%#v) returned nil", patch)
 		}
 	}
 }
