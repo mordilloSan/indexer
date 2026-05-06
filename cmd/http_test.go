@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mordilloSan/indexer/indexing"
+	"github.com/mordilloSan/indexer/internal/configfile"
 	"github.com/mordilloSan/indexer/storage"
 )
 
@@ -120,6 +121,78 @@ func TestHandleAddAndDelete(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("file row still present after delete")
+	}
+}
+
+func TestHandleConfigPutRequiresUnixSocket(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "indexer.json")
+	d := &daemon{
+		cfg: DaemonConfig{
+			IndexName:     "root",
+			IndexPath:     "/",
+			IncludeHidden: true,
+			DBPath:        "/tmp/indexer.db",
+			SocketPath:    "/var/run/indexer.sock",
+			ConfigPath:    configPath,
+		},
+		savedConfig: configfile.Defaults(),
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/config", bytes.NewBufferString(`{"index_path":"/data"}`))
+	rr := httptest.NewRecorder()
+	d.handleConfig(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("handleConfig status = %d, want 403; body=%s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("config file should not have been written, stat err=%v", err)
+	}
+}
+
+func TestHandleConfigPutWritesFileAndAppliesRuntimeFields(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "indexer.json")
+	d := &daemon{
+		cfg: DaemonConfig{
+			IndexName:     "root",
+			IndexPath:     "/",
+			IncludeHidden: true,
+			DBPath:        "/tmp/indexer.db",
+			SocketPath:    "/var/run/indexer.sock",
+			Interval:      time.Hour,
+			ConfigPath:    configPath,
+		},
+		savedConfig:   configfile.Defaults(),
+		configChanged: make(chan struct{}, 1),
+	}
+
+	body := `{"index_path":"/data","include_hidden":false,"interval":"30m","listen_addr":":8080"}`
+	req := httptest.NewRequest(http.MethodPut, "/config", bytes.NewBufferString(body))
+	req = req.WithContext(withConnectionKind(req.Context(), connectionKindUnix))
+	rr := httptest.NewRecorder()
+	d.handleConfig(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("handleConfig status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-Indexer-Restart-Required") != "true" {
+		t.Fatalf("expected restart-required header for listen_addr change")
+	}
+
+	saved, err := configfile.Load(configPath)
+	if err != nil {
+		t.Fatalf("load saved config: %v", err)
+	}
+	if saved.IndexPath != "/data" || saved.IncludeHidden || saved.Interval != "30m0s" || saved.ListenAddr != ":8080" {
+		t.Fatalf("unexpected saved config: %#v", saved)
+	}
+
+	active := d.configSnapshot()
+	if active.IndexPath != "/data" || active.IncludeHidden || active.Interval != 30*time.Minute {
+		t.Fatalf("runtime-safe fields were not applied: %#v", active)
+	}
+	if active.ListenAddr != "" {
+		t.Fatalf("listen_addr should require restart before runtime apply, got %q", active.ListenAddr)
 	}
 }
 

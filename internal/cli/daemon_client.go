@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/mordilloSan/indexer/internal/configfile"
 )
 
 func queryDaemonSetupConfig(socketPath, listenAddr string) (setupConfig, error) {
@@ -25,6 +27,13 @@ func queryDaemonSetupConfig(socketPath, listenAddr string) (setupConfig, error) 
 		FreshIndex           bool   `json:"fresh_index"`
 		KeepIndexes          int    `json:"keep_indexes"`
 		DBPath               string `json:"db_path"`
+		DBBusyTimeout        string `json:"db_busy_timeout"`
+		DBJournalMode        string `json:"db_journal_mode"`
+		DBSynchronous        string `json:"db_synchronous"`
+		DBAutoVacuum         string `json:"db_auto_vacuum"`
+		DBMaxOpenConns       int    `json:"db_max_open_conns"`
+		DBMaxIdleConns       int    `json:"db_max_idle_conns"`
+		DBConnMaxIdleTime    string `json:"db_conn_max_idle_time"`
 		SocketPath           string `json:"socket_path"`
 		ListenAddr           string `json:"listen_addr"`
 		Interval             string `json:"interval"`
@@ -42,17 +51,25 @@ func queryDaemonSetupConfig(socketPath, listenAddr string) (setupConfig, error) 
 		interval = "0"
 	}
 	return setupConfig{
-		IndexPath:            resp.IndexPath,
-		IndexName:            resp.IndexName,
-		IncludeHidden:        resp.IncludeHidden,
-		IncludeNetworkMounts: resp.IncludeNetworkMounts,
-		FreshIndex:           resp.FreshIndex,
-		KeepIndexes:          resp.KeepIndexes,
-		DBPath:               resp.DBPath,
-		SocketPath:           socketPath,
-		Interval:             interval,
-		ListenAddr:           resp.ListenAddr,
-		ListenFlag:           "",
+		Config: configfile.Config{
+			IndexPath:            resp.IndexPath,
+			IndexName:            resp.IndexName,
+			IncludeHidden:        resp.IncludeHidden,
+			IncludeNetworkMounts: resp.IncludeNetworkMounts,
+			FreshIndex:           resp.FreshIndex,
+			KeepIndexes:          resp.KeepIndexes,
+			DBPath:               resp.DBPath,
+			DBBusyTimeout:        resp.DBBusyTimeout,
+			DBJournalMode:        resp.DBJournalMode,
+			DBSynchronous:        resp.DBSynchronous,
+			DBAutoVacuum:         resp.DBAutoVacuum,
+			DBMaxOpenConns:       resp.DBMaxOpenConns,
+			DBMaxIdleConns:       resp.DBMaxIdleConns,
+			DBConnMaxIdleTime:    resp.DBConnMaxIdleTime,
+			SocketPath:           socketPath,
+			Interval:             interval,
+			ListenAddr:           resp.ListenAddr,
+		},
 	}, nil
 }
 

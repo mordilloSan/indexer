@@ -18,7 +18,7 @@ The goal was to have a permanently running daemon with minimal memory footprint,
 - [Architecture](#architecture)
 - [Database schema](#database-schema)
 - [Development](#development)
-- [Configuration file (`/etc/default/indexer`)](#configuration-file-etcdefaultindexer)
+- [Configuration file](#configuration-file)
 - [Performance](#performance)
 - [Limitations](#limitations)
 - [License](#license)
@@ -56,7 +56,7 @@ curl --unix-socket /tmp/indexer.sock 'http://localhost/search?q=log&limit=20'
 If you installed via systemd, you can also query status with:
 
 ```bash
-indexer status
+sudo indexer status
 ```
 
 To index a folder once and exit:
@@ -84,7 +84,7 @@ sudo ./scripts/local_install.sh
 The script performs the following steps:
 1. Builds the binary and installs it to `/usr/local/bin/indexer`
 2. Installs systemd service and socket units from the `systemd/` directory
-3. Creates `/etc/default/indexer` configuration file with environment variables
+3. Creates `/etc/indexer/config.json` configuration file
 4. Enables socket activation and starts the daemon
 5. Verifies the installation
 
@@ -102,7 +102,7 @@ To install a specific version:
 curl -fsSL https://github.com/mordilloSan/indexer/releases/download/v1.2.0/indexer-install.sh | sudo bash
 ```
 
-After installation, edit `/etc/default/indexer` to configure the path to index, interval, and other options. Systemd socket activation is used by default, so the daemon starts on-demand when the socket is accessed.
+After installation, edit `/etc/indexer/config.json` to configure the path to index, interval, and other options. Systemd socket activation is used by default, so the daemon starts on-demand when the socket is accessed.
 
 Notes:
 - The installers place the binary at `/usr/local/bin/indexer` (usually already on `$PATH`).
@@ -121,23 +121,33 @@ sudo systemctl status indexer.service --no-pager
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--path` | **(required)** | Filesystem root to index |
-| `--name` | sanitized `path` | Index name (alphanumeric identifier) |
-| `--include-hidden` | `false` | Include dotfiles and dotdirs |
+| `--config-file` | `/config/indexer.json` when `/config` exists, otherwise `/etc/indexer/config.json` | JSON config file |
+| `--path` | `/` | Filesystem root to index |
+| `--name` | `root` | Index name (alphanumeric identifier) |
+| `--include-hidden` | `true` | Include dotfiles and dotdirs |
 | `--include-network-mounts` | `false` | Traverse network/external mounts such as NFS, SMB, and CIFS |
 | `--fresh` | `true` | Clear existing index data before a full index |
 | `--keep-indexes` | `0` | Automatically prune old index records after indexing; `0` disables automatic pruning. Use with `--fresh=false` when keeping history. |
-| `--db-path` | `/tmp/indexer.db` | SQLite database path (or `$INDEXER_DB_PATH`) |
+| `--db-path` | `/tmp/indexer.db` | SQLite database path |
+| `--db-busy-timeout` | `5s` | SQLite busy timeout |
+| `--db-journal-mode` | `WAL` | SQLite journal mode |
+| `--db-synchronous` | `OFF` | SQLite synchronous setting |
+| `--db-auto-vacuum` | `INCREMENTAL` | SQLite auto-vacuum setting |
+| `--db-max-open-conns` | `5` | SQLite max open connections |
+| `--db-max-idle-conns` | `2` | SQLite max idle connections |
+| `--db-conn-max-idle-time` | `5m0s` | SQLite idle connection lifetime |
 | `--socket-path` | `/var/run/indexer.sock` | Unix socket path for API |
 | `--listen` | *(disabled)* | TCP address for HTTP API (e.g., `:8080`) |
-| `--interval` | `1h` | Auto-index interval (`6h`, `30m`, etc.); `0` disables |
+| `--interval` | `1h0m0s` | Auto-index interval (`6h`, `30m`, etc.); `0` disables |
 | `--verbose` | `false` | Enable debug logging |
+
+Daemon config load order is: built-in defaults, JSON config file, `INDEXER_*` environment overrides, then command-line/systemd flags.
 
 Commands:
 - `indexer daemon ...` starts the API daemon and scheduler.
-- `indexer index ...` indexes one folder and exits. It accepts `--path`, `--name`, `--include-hidden`, `--include-network-mounts`, `--fresh`, `--keep-indexes`, `--db-path`, `--cpu-profile`, and `--verbose`.
+- `indexer index ...` indexes one folder and exits. It accepts `--path`, `--name`, `--include-hidden`, `--include-network-mounts`, `--fresh`, `--keep-indexes`, database flags, `--cpu-profile`, and `--verbose`.
 - `indexer status` and `indexer config` query a running daemon.
-- `indexer setup` opens a plain terminal wizard for editing `/etc/default/indexer` and restarting the service.
+- `indexer setup` opens a plain terminal wizard for editing the JSON config file and restarting the service.
 - `indexer version` prints version/build info.
 
 On startup (CLI or systemd), `indexer` logs its version/build info.
@@ -323,6 +333,49 @@ Response: `{"status":"ok"}` (no-op if the path was not present).
 
 Returns `400` if no index exists yet.
 
+#### `GET /config`
+
+Return the persisted admin configuration JSON.
+
+```bash
+curl --unix-socket /tmp/indexer.sock http://localhost/config
+```
+
+Example:
+```json
+{
+  "index_path": "/",
+  "index_name": "root",
+  "include_hidden": true,
+  "include_network_mounts": false,
+  "fresh_index": true,
+  "keep_indexes": 0,
+  "db_path": "/tmp/indexer.db",
+  "db_busy_timeout": "5s",
+  "db_journal_mode": "WAL",
+  "db_synchronous": "OFF",
+  "db_auto_vacuum": "INCREMENTAL",
+  "db_max_open_conns": 5,
+  "db_max_idle_conns": 2,
+  "db_conn_max_idle_time": "5m0s",
+  "socket_path": "/var/run/indexer.sock",
+  "listen_addr": "",
+  "interval": "1h0m0s"
+}
+```
+
+#### `PUT /config`
+
+Update the persisted admin configuration. Writes are accepted only over the Unix socket; TCP requests return `403`.
+
+```bash
+curl --unix-socket /tmp/indexer.sock -X PUT http://localhost/config \
+  -H 'Content-Type: application/json' \
+  -d '{"index_path":"/data","interval":"6h"}'
+```
+
+The daemon validates the JSON, writes the config file atomically, and applies runtime-safe fields immediately. Changes to `db_path`, any `db_*` SQLite setting, `socket_path`, or `listen_addr` are persisted but require a daemon restart to fully take effect; those responses include `X-Indexer-Restart-Required: true`.
+
 #### `GET /openapi.json`
 
 OpenAPI 3.0 document for the API (version 2.2.0).
@@ -333,11 +386,13 @@ OpenAPI 3.0 document for the API (version 2.2.0).
 indexer/
 ├── main.go              # Thin CLI entrypoint
 ├── internal/
+│   ├── configfile/
+│   │   └── config.go        # Stable JSON config model, validation, atomic writes
 │   └── cli/
 │       ├── main.go          # Command dispatch and daemon startup
 │       ├── config.go        # Non-interactive config file updates
 │       ├── setup.go         # Interactive setup wizard
-│       ├── envfile.go       # systemd EnvironmentFile parsing and atomic writes
+│       ├── envfile.go       # Legacy systemd EnvironmentFile parser helpers
 │       ├── daemon_client.go # CLI client for daemon status/config endpoints
 │       ├── index_command.go # One-shot index command and index-mode subprocess
 │       └── util.go          # Shared CLI helpers
@@ -472,43 +527,42 @@ You can tweak the workload by exporting environment variables:
 
 All other knobs (e.g., `DB_PATH`, `SOCKET_PATH`, `TOP_SNAPSHOT`) can also be overridden—check the script header for defaults. The script cleans up its temporary dataset and reports any failures with links to the captured logs.
 
-## Configuration file (`/etc/default/indexer`)
+## Configuration file
 
-When you install via `scripts/local_install.sh`, `scripts/global_install.sh`, or the GitHub Release installer, the systemd unit reads `/etc/default/indexer` (if present) and uses it to set the daemon flags.
-
-If `/etc/default/indexer` is not present, the systemd unit still starts using its built-in defaults (it uses `EnvironmentFile=-/etc/default/indexer`, where the leading `-` means “optional”).
+Indexer uses a stable JSON config file. Native systemd installs use `/etc/indexer/config.json`; LinuxServer.io-style containers should use `/config/indexer.json`, matching the usual persisted `/config` volume. You can override the path with `--config-file` or `INDEXER_CONFIG_FILE`.
 
 Common settings:
 
-```bash
-# Filesystem root to index
-INDEXER_PATH=/data
-
-# Index name (identifier)
-INDEXER_NAME=data
-
-# Include dotfiles/dotdirs (true/false)
-INDEXER_INCLUDE_HIDDEN=false
-
-# Include NFS/SMB/CIFS-style mounts while traversing (true/false)
-INDEXER_INCLUDE_NETWORK_MOUNTS=false
-
-# Clear existing DB data before each full index (true/false)
-INDEXER_FRESH=true
-
-# Keep this many latest index records after indexing; 0 disables automatic pruning
-INDEXER_KEEP_INDEXES=0
-
-# SQLite DB path
-INDEXER_DB_PATH=/tmp/indexer.db
-
-# Auto-index interval (e.g., 6h, 30m); set 0 to disable
-INDEXER_INTERVAL=6h
-
-# Optional extra flags appended to the daemon command line
-# (Example: expose HTTP over TCP as well as the Unix socket)
-INDEXER_LISTEN_FLAG=--listen=:8080
+```json
+{
+  "index_path": "/data",
+  "index_name": "data",
+  "include_hidden": false,
+  "include_network_mounts": false,
+  "fresh_index": true,
+  "keep_indexes": 0,
+  "db_path": "/tmp/indexer.db",
+  "db_busy_timeout": "5s",
+  "db_journal_mode": "WAL",
+  "db_synchronous": "OFF",
+  "db_auto_vacuum": "INCREMENTAL",
+  "db_max_open_conns": 5,
+  "db_max_idle_conns": 2,
+  "db_conn_max_idle_time": "5m0s",
+  "socket_path": "/var/run/indexer.sock",
+  "listen_addr": "",
+  "interval": "6h0m0s"
+}
 ```
+
+On daemon startup, values are applied in this order:
+
+1. Built-in defaults
+2. JSON config file
+3. `INDEXER_*` environment overrides
+4. CLI/systemd flags
+
+The `db_journal_mode`, `db_synchronous`, `db_auto_vacuum`, and connection pool fields control SQLite open-time behavior. Defaults keep WAL enabled for concurrent readers while indexing.
 
 Apply changes:
 
@@ -528,7 +582,9 @@ For scripts or one-off edits, `indexer config set` updates the same file without
 sudo indexer config set --path "/media/My Drive" --interval 6h
 ```
 
-Add `--dry-run` to either command to print the resulting environment file without writing it or restarting the service.
+Add `--dry-run` to either command to print the resulting JSON file without writing it or restarting the service.
+
+The daemon also exposes `GET /config` and Unix-socket-only `PUT /config` for settings UIs. Socket permissions are the local guard; the packaged systemd socket uses `0660`.
 
 Service files are available in the `systemd/` directory for reference.
 
