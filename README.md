@@ -26,7 +26,7 @@ The goal is to provide a low-memory filesystem index with an on-demand API, fast
 ## Features
 
 - Socket-activated HTTP API on a Unix socket by default; optional TCP listener for remote access.
-- Full-screen terminal dashboard for stats, service state, logs, and common actions.
+- Plain terminal overview for API stats plus socket/timer state.
 - Streaming writes to SQLite (500-entry batches) to keep memory low (~150 MB for ~1M files).
 - Server-Sent Events (SSE) streaming for real-time progress updates during reindex and vacuum operations.
 - Hardlink-aware size accounting so totals match `du`; deleted entries are cleaned after each run.
@@ -150,11 +150,10 @@ Daemon config load order is: built-in defaults, JSON config file, `INDEXER_*` en
 Commands:
 - `indexer daemon ...` starts the API daemon. The built-in scheduler still works when `--interval` is non-zero, but native systemd units disable it and use `indexer-index.timer`.
 - `indexer index ...` indexes one folder and exits. It accepts `--config-file`, `--path`, `--name`, `--include-hidden`, `--include-network-mounts`, `--fresh`, `--keep-indexes`, database flags, `--cpu-profile`, and `--verbose`.
-- `indexer status` queries the API daemon and may socket-activate it.
+- `indexer status` prints a plain status overview and may socket-activate the API daemon.
 - `indexer config` reads the JSON config file by default; add `--runtime` to query the daemon.
 - `indexer config apply` syncs the current JSON config to systemd target/socket/timer drop-ins.
 - `indexer service status|logs|run-now` wraps common systemd status, journal, and one-shot index operations.
-- `indexer dashboard` opens a full-screen terminal dashboard for stats, unit state, logs, and confirmed actions.
 - `indexer setup` opens a plain terminal wizard for editing the JSON config file and applying systemd target/timer/socket changes.
 - `indexer version` prints version/build info.
 
@@ -414,7 +413,7 @@ indexer/
 │   └── cli/
 │       ├── main.go          # Command dispatch and daemon startup
 │       ├── config.go        # Non-interactive config file updates
-│       ├── dashboard.go     # Full-screen terminal dashboard
+│       ├── status_overview.go # Plain terminal status overview
 │       ├── systemd.go       # Systemd status/log/action helpers
 │       ├── setup.go         # Interactive setup wizard
 │       ├── envfile.go       # Legacy systemd EnvironmentFile parser helpers
@@ -612,13 +611,13 @@ sudo indexer config set --path "/media/My Drive" --interval 6h
 
 On native systemd installs, `indexer config set --interval ...` also updates `/etc/systemd/system/indexer-index.timer.d/override.conf` and restarts the timer. `--interval 0` disables the timer and removes it from `indexer.target` through a target drop-in. Socket path changes are applied through an `indexer.socket` drop-in and reflected in `indexer.target`. Use `indexer config apply` after manual JSON edits to regenerate those drop-ins. Add `--dry-run` to setup/config-set commands to print the resulting JSON file without writing it or applying systemd changes.
 
-For an interactive terminal overview:
+For a terminal overview:
 
 ```bash
-sudo indexer dashboard
+sudo indexer status
 ```
 
-The dashboard shows API status, index statistics, systemd unit state, and recent logs. It can also run confirmed actions such as starting `indexer-index.service`, applying config, stopping the disposable API daemon, restarting `indexer.target`, and triggering `/vacuum` or `/prune`.
+The status overview is intentionally plain: it prints API status, index statistics, and a compact socket/timer summary without pulling in a TUI framework. Use `--watch` to refresh it in place. For detailed units, actions, and logs, use `indexer service status`, `indexer service run-now`, `indexer config apply`, and `indexer service logs`.
 
 The daemon also exposes `GET /config` and Unix-socket-only `PUT /config` for settings UIs. Socket permissions are the local guard; the packaged systemd socket uses `0660`.
 

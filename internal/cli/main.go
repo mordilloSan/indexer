@@ -15,7 +15,6 @@ import (
 )
 
 const (
-	defaultServiceName      = "indexer"
 	defaultServiceUnit      = "indexer.service"
 	defaultIndexServiceUnit = "indexer-index.service"
 )
@@ -25,10 +24,9 @@ const usageText = `Usage: indexer <command> [flags]
 Commands:
   daemon    Start the indexer daemon
   index     Index one folder and exit
-  status    Query status from a running daemon
+  status    Print status overview
   config    Show configuration of a running daemon
   service   Manage systemd units
-  dashboard Full-screen status dashboard
   setup     Interactive systemd configuration wizard
   version   Print version information
 
@@ -69,8 +67,6 @@ func Main(args []string) {
 		runConfig(args[1:])
 	case "service":
 		runService(args[1:])
-	case "dashboard":
-		runDashboard(args[1:])
 	case "setup":
 		runSetup(args[1:])
 	case "version":
@@ -223,17 +219,7 @@ func runIndex(args []string) {
 }
 
 func runStatus(args []string) {
-	fs := flag.NewFlagSet("status", flag.ExitOnError)
-	socketPath := fs.String("socket-path", "/var/run/indexer.sock", "Unix socket path")
-	listenAddr := fs.String("listen", "", "TCP address of the daemon (e.g., :8080)")
-	if err := fs.Parse(args); err != nil {
-		os.Exit(1)
-	}
-
-	if err := queryDaemon(*socketPath, *listenAddr, "/status"); err != nil {
-		writelnOrExit(os.Stderr, err.Error())
-		os.Exit(1)
-	}
+	runStatusOverview("status", args)
 }
 
 func runConfig(args []string) {

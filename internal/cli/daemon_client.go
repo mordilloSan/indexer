@@ -73,16 +73,6 @@ func queryDaemonSetupConfig(socketPath, listenAddr string) (setupConfig, error) 
 	}, nil
 }
 
-// queryDaemon sends a GET request to the given endpoint on the running daemon and prints the response.
-func queryDaemon(socketPath, listenAddr, endpoint string) error {
-	body, err := fetchDaemonBody(socketPath, listenAddr, endpoint)
-	if err != nil {
-		return err
-	}
-	writelnOrExit(os.Stdout, strings.TrimSpace(string(body)))
-	return nil
-}
-
 // queryDaemonPretty is like queryDaemon but pretty-prints JSON responses.
 func queryDaemonPretty(socketPath, listenAddr, endpoint string) error {
 	body, err := fetchDaemonBody(socketPath, listenAddr, endpoint)
@@ -106,10 +96,6 @@ func queryDaemonPretty(socketPath, listenAddr, endpoint string) error {
 
 func fetchDaemonBody(socketPath, listenAddr, endpoint string) ([]byte, error) {
 	return daemonBodyFetcher(http.MethodGet, socketPath, listenAddr, endpoint)
-}
-
-func postDaemonBody(socketPath, listenAddr, endpoint string) ([]byte, error) {
-	return daemonBodyFetcher(http.MethodPost, socketPath, listenAddr, endpoint)
 }
 
 var daemonBodyFetcher = daemonBody

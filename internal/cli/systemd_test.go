@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -128,7 +129,51 @@ func TestServiceRunNowStartsIndexJob(t *testing.T) {
 	}
 }
 
-func TestCollectDashboardSnapshotUsesConfigAPIAndSystemd(t *testing.T) {
+func TestServiceLogsIndexAggregatesJournalSources(t *testing.T) {
+	restoreCommand := systemCommandOutput
+	defer func() { systemCommandOutput = restoreCommand }()
+
+	var calls [][]string
+	systemCommandOutput = func(name string, args ...string) ([]byte, error) {
+		if name != "journalctl" {
+			t.Fatalf("command = %q, want journalctl", name)
+		}
+		calls = append(calls, append([]string{}, args...))
+		if slices.Contains(args, "-t") {
+			return []byte("identifier log line\n"), nil
+		}
+		return []byte("unit log line\n"), nil
+	}
+
+	out, err := serviceLogs("index", 12)
+	if err != nil {
+		t.Fatalf("serviceLogs: %v", err)
+	}
+	if !strings.Contains(out, "unit log line") || !strings.Contains(out, "identifier log line") {
+		t.Fatalf("out = %q", out)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("journalctl calls = %#v, want 2 calls", calls)
+	}
+
+	for _, want := range []string{
+		defaultIndexServiceUnit,
+		defaultTimerUnit,
+		"indexer-index*.scope",
+		"12",
+	} {
+		if !slices.Contains(calls[0], want) {
+			t.Fatalf("journalctl unit args = %#v, missing %q", calls[0], want)
+		}
+	}
+	for _, want := range []string{"-t", "indexer-index", "12"} {
+		if !slices.Contains(calls[1], want) {
+			t.Fatalf("journalctl identifier args = %#v, missing %q", calls[1], want)
+		}
+	}
+}
+
+func TestCollectStatusOverviewSnapshotUsesConfigAPIAndSystemd(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "indexer.json")
 	cfg := configfile.Defaults()
@@ -159,9 +204,9 @@ func TestCollectDashboardSnapshotUsesConfigAPIAndSystemd(t *testing.T) {
 		return []byte(`{"status":"idle","num_files":12,"num_dirs":3,"total_entries":15,"total_on_disk":2048}`), nil
 	}
 
-	opts := defaultDashboardOptions()
+	opts := defaultStatusOverviewOptions()
 	opts.ConfigPath = configPath
-	snap := collectDashboardSnapshot(opts, defaultServiceUnit)
+	snap := collectStatusOverviewSnapshot(opts)
 
 	if snap.Config.IndexPath != "/srv/data" {
 		t.Fatalf("IndexPath = %q, want /srv/data", snap.Config.IndexPath)
@@ -175,11 +220,50 @@ func TestCollectDashboardSnapshotUsesConfigAPIAndSystemd(t *testing.T) {
 	if len(snap.Units) != 5 {
 		t.Fatalf("len(Units) = %d, want 5", len(snap.Units))
 	}
-	if !strings.Contains(snap.Logs, "api log line") {
-		t.Fatalf("Logs = %q", snap.Logs)
-	}
 	if time.Since(snap.CollectedAt) > time.Minute {
 		t.Fatalf("CollectedAt looks stale: %s", snap.CollectedAt)
+	}
+
+	details := statusOverviewDetails(snap, 120)
+	for _, want := range []string{
+		"Files:",
+		"12",
+		"Dirs:",
+		"3",
+	} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("status overview details missing %q:\n%s", want, details)
+		}
+	}
+	for _, removed := range []string{"Entries:", "DB on disk:", "SHM:", "RSS:", "Cg current:", "Cg anon:", "Cg file:"} {
+		if strings.Contains(details, removed) {
+			t.Fatalf("status overview details still include %q:\n%s", removed, details)
+		}
+	}
+
+	configLines := statusOverviewConfigLines(snap, 80)
+	for _, line := range configLines {
+		if strings.Contains(line, "Config:") && strings.Contains(line, "DB:") {
+			t.Fatalf("configuration section should use row layout, got line %q", line)
+		}
+	}
+	apiLines := statusOverviewAPILines(snap, 80)
+	for _, line := range apiLines {
+		if strings.Contains(line, "Status:") && strings.Contains(line, "Files:") {
+			t.Fatalf("API status section should use row layout, got line %q", line)
+		}
+	}
+
+	text := statusOverviewText(snap, 120)
+	for _, want := range []string{"Indexer", "Configuration", "API status"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("status overview text missing %q:\n%s", want, text)
+		}
+	}
+	for _, removed := range []string{"[::", "Logs:", "Time:", "Systemd units", defaultTargetUnit, defaultServiceUnit} {
+		if strings.Contains(text, removed) {
+			t.Fatalf("status overview text still includes %q:\n%s", removed, text)
+		}
 	}
 }
 

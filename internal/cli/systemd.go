@@ -74,16 +74,17 @@ func runServiceStatus(args []string) {
 
 func runServiceLogs(args []string) {
 	fs := flag.NewFlagSet("service logs", flag.ExitOnError)
-	unit := fs.String("unit", defaultServiceUnit, "Systemd unit to read")
+	unit := fs.String("unit", defaultServiceUnit, "Systemd unit or alias to read")
 	lines := fs.Int("lines", 80, "Number of journal lines")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
 	}
+	selector := *unit
 	if fs.NArg() > 0 {
-		*unit = serviceLogUnit(fs.Arg(0))
+		selector = fs.Arg(0)
 	}
 
-	out, err := journalctlUnitLogs(*unit, *lines)
+	out, err := serviceLogs(selector, *lines)
 	if err != nil {
 		writelnOrExit(os.Stderr, err.Error())
 		os.Exit(1)
@@ -102,6 +103,15 @@ func runServiceRunNow(args []string) {
 		os.Exit(1)
 	}
 	writefOrExit(os.Stdout, "started %s\n", *unit)
+}
+
+func serviceLogs(selector string, lines int) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(selector)) {
+	case "index", "indexer", "job":
+		return journalctlIndexLogs(defaultIndexServiceUnit, defaultTimerUnit, lines)
+	default:
+		return journalctlUnitLogs(serviceLogUnit(selector), lines)
+	}
 }
 
 func serviceLogUnit(alias string) string {
@@ -203,12 +213,47 @@ func unitOrder(unit string) int {
 }
 
 func journalctlUnitLogs(unit string, lines int) (string, error) {
+	return journalctlLogs(lines, "-u", unit)
+}
+
+func journalctlIndexLogs(indexUnit, timerUnit string, lines int) (string, error) {
+	unitLogs, err := journalctlLogs(lines,
+		"-u", indexUnit,
+		"-u", timerUnit,
+		"-u", "indexer-index*.scope",
+	)
+	if err != nil {
+		return unitLogs, fmt.Errorf("journalctl index units failed: %w", err)
+	}
+
+	identifierLogs, err := journalctlLogs(lines, "-t", "indexer-index")
+	if err != nil {
+		return identifierLogs, fmt.Errorf("journalctl index identifier failed: %w", err)
+	}
+
+	var sections []string
+	appendJournalSection(&sections, "units: "+indexUnit+", "+timerUnit+", indexer-index*.scope", unitLogs)
+	appendJournalSection(&sections, "identifier: indexer-index", identifierLogs)
+	return strings.Join(sections, "\n"), nil
+}
+
+func appendJournalSection(sections *[]string, label, output string) {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" || strings.Contains(trimmed, "-- No entries --") {
+		return
+	}
+	*sections = append(*sections, "== "+label+" ==\n"+trimmed+"\n")
+}
+
+func journalctlLogs(lines int, filters ...string) (string, error) {
 	if lines <= 0 {
 		lines = 80
 	}
-	out, err := systemCommandOutput("journalctl", "-u", unit, "-n", strconv.Itoa(lines), "--no-pager")
+	args := append([]string{}, filters...)
+	args = append(args, "-n", strconv.Itoa(lines), "--no-pager")
+	out, err := systemCommandOutput("journalctl", args...)
 	if err != nil {
-		return string(out), fmt.Errorf("journalctl %s failed: %w: %s", unit, err, strings.TrimSpace(string(out)))
+		return string(out), fmt.Errorf("journalctl failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return string(out), nil
 }
