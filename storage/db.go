@@ -812,14 +812,19 @@ func DeletePathRecursive(ctx context.Context, db *sql.DB, indexID int64, relativ
 		}
 	}()
 
-	// Calculate total size of all entries being deleted
-	var totalSize int64
+	// Read the size of the target row. Directory rows already hold the rolled-up
+	// subtree size, and file rows hold their own size — either way, this is the
+	// correct delta to apply to ancestors. Summing across the LIKE pattern would
+	// double-count, since descendants are already accounted for in the parent
+	// directory's size column.
+	var targetSize sql.NullInt64
 	err = tx.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(size), 0)
-		FROM entries
-		WHERE index_id = ? AND (relative_path = ? OR relative_path LIKE ? ESCAPE '\');
-	`, indexID, relativePath, SubtreeLikePattern(relativePath)).Scan(&totalSize)
-	if err != nil {
+		SELECT size FROM entries
+		WHERE index_id = ? AND relative_path = ?;
+	`, indexID, relativePath).Scan(&targetSize)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = nil
+	} else if err != nil {
 		return err
 	}
 
@@ -833,8 +838,8 @@ func DeletePathRecursive(ctx context.Context, db *sql.DB, indexID int64, relativ
 	}
 
 	// Propagate size changes to parent directories
-	if totalSize != 0 {
-		if err := UpdateParentDirectorySizes(ctx, tx, indexID, relativePath, -totalSize); err != nil {
+	if targetSize.Valid && targetSize.Int64 != 0 {
+		if err := UpdateParentDirectorySizes(ctx, tx, indexID, relativePath, -targetSize.Int64); err != nil {
 			return err
 		}
 	}

@@ -409,6 +409,12 @@ func (s *Store) DeleteEntryWithSizeUpdate(ctx context.Context, indexID int64, re
 	return DeleteEntryWithSizeUpdate(ctx, s.db, indexID, relativePath)
 }
 
+// DeletePathRecursive deletes the entry at relativePath plus every descendant
+// and propagates the aggregated size change to ancestor directories.
+func (s *Store) DeletePathRecursive(ctx context.Context, indexID int64, relativePath string) error {
+	return DeletePathRecursive(ctx, s.db, indexID, relativePath)
+}
+
 // SubfolderResult represents a direct subfolder with its size
 type SubfolderResult struct {
 	Path    string    `json:"path"`
