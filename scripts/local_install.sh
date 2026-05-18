@@ -33,6 +33,18 @@ if systemctl list-unit-files | grep -q '^indexer.socket'; then
     systemctl disable indexer.socket 2>/dev/null || true
 fi
 
+if systemctl list-unit-files | grep -q '^indexer-index.timer'; then
+    echo -e "${YELLOW}Stopping existing indexer-index.timer (if running)...${NC}"
+    systemctl stop indexer-index.timer 2>/dev/null || true
+    echo -e "${YELLOW}Disabling existing indexer-index.timer...${NC}"
+    systemctl disable indexer-index.timer 2>/dev/null || true
+fi
+
+if systemctl list-unit-files | grep -q '^indexer-index.service'; then
+    echo -e "${YELLOW}Stopping existing indexer-index.service (if running)...${NC}"
+    systemctl stop indexer-index.service 2>/dev/null || true
+fi
+
 # Step 1: Verify the prebuilt binary exists
 echo -e "${YELLOW}[1/5]${NC} Verifying prebuilt binary..."
 if [ ! -x "./indexer" ]; then
@@ -52,6 +64,8 @@ echo -e "${GREEN}✓${NC} Binary installed"
 echo -e "${YELLOW}[3/5]${NC} Installing systemd files..."
 cp systemd/indexer.service /etc/systemd/system/
 cp systemd/indexer.socket /etc/systemd/system/
+cp systemd/indexer-index.service /etc/systemd/system/
+cp systemd/indexer-index.timer /etc/systemd/system/
 echo -e "${GREEN}✓${NC} Systemd files installed"
 
 # Ensure data and config directories exist
@@ -87,14 +101,14 @@ EOF
     echo -e "${GREEN}✓${NC} /etc/indexer/config.json created (edit to suit your system)"
 fi
 
-# Step 4: Reload systemd and enable socket + service
-echo -e "${YELLOW}[4/5]${NC} Enabling systemd socket and service..."
+# Step 4: Reload systemd and enable socket + timer
+echo -e "${YELLOW}[4/5]${NC} Enabling systemd socket and timer..."
 systemctl daemon-reload
 systemctl enable indexer.socket
-systemctl enable indexer.service
+systemctl enable indexer-index.timer
 systemctl start indexer.socket
-systemctl start indexer.service
-echo -e "${GREEN}✓${NC} Socket and service started${NC}"
+systemctl start indexer-index.timer
+echo -e "${GREEN}✓${NC} Socket and timer started${NC}"
 
 # Step 5: Verify installation
 echo -e "${YELLOW}[5/5]${NC} Verifying installation..."
@@ -107,10 +121,10 @@ else
     exit 1
 fi
 
-if systemctl is-active --quiet indexer.service; then
-    echo -e "${GREEN}✓${NC} Service is active"
+if systemctl is-active --quiet indexer-index.timer; then
+    echo -e "${GREEN}✓${NC} Index timer is active"
 else
-    echo -e "${RED}✗${NC} Service is not active"
+    echo -e "${RED}✗${NC} Index timer is not active"
     exit 1
 fi
 
@@ -121,22 +135,24 @@ echo -e "${YELLOW}Usage:${NC}"
 echo "  Edit configuration:"
 echo "    sudo nano /etc/indexer/config.json"
 echo ""
-echo "  Restart daemon with new settings:"
-echo "    sudo systemctl restart indexer.service"
+echo "  Apply configuration:"
+echo "    sudo indexer config set --interval 6h"
 echo ""
 echo "  Check status:"
 echo "    sudo systemctl status indexer.socket"
+echo "    sudo systemctl status indexer-index.timer"
 echo "    sudo systemctl status indexer.service"
 echo ""
 echo "  View logs:"
 echo "    sudo journalctl -u indexer.service -f"
+echo "    sudo journalctl -u indexer-index.service -f"
 echo ""
 echo "  Manual index (via HTTP API):"
 echo "    sudo curl -X POST --unix-socket /var/run/indexer.sock http://localhost/index"
 echo ""
 echo "  Auto-index interval:"
-echo "    Edit interval in /etc/indexer/config.json (e.g., 1h0m0s, 6h0m0s, 30m0s)"
-echo "    Set to 0 to disable automatic indexing"
+echo "    sudo indexer config set --interval 6h"
+echo "    Set to 0 to disable the systemd timer"
 echo ""
 echo "  Socket location: /var/run/indexer.sock (managed by systemd)"
 echo ""

@@ -20,6 +20,7 @@ func runInternalIndexMode(args []string) {
 
 func runIndexCommand(flagSetName string, args []string) {
 	fs := flag.NewFlagSet(flagSetName, flag.ExitOnError)
+	configPath := fs.String("config-file", configfile.PathFromEnvOrDefault(), "JSON config file path")
 	indexPath := fs.String("path", "", "Path to index")
 	indexName := fs.String("name", "", "Index name")
 	includeHidden := fs.Bool("include-hidden", false, "Include hidden files")
@@ -41,54 +42,143 @@ func runIndexCommand(flagSetName string, args []string) {
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
 	}
+	hasConfigSource := flagWasSet(fs, "config-file") ||
+		strings.TrimSpace(os.Getenv(configfile.EnvConfigFile)) != "" ||
+		fileExists(*configPath)
 
 	logging.Configure("indexer-index", *verbose)
 	slog.Info("indexer starting", "version", version.String(), "mode", "index")
 
-	if *indexPath == "" {
+	if !flagWasSet(fs, "path") && !hasConfigSource {
 		slog.Error("missing required flag", "flag", "--path")
 		fs.Usage()
 		os.Exit(1)
 	}
 
-	nameVal := sanitizeName(*indexName, *indexPath)
-	dbVal := coalesce(*dbPath, os.Getenv("INDEXER_DB_PATH"), "/tmp/indexer.db")
-	indexOpts := indexOptions{
-		FreshIndex:           *freshIndex,
-		IncludeNetworkMounts: *includeNetworkMounts,
-		KeepIndexes:          *keepIndexes,
-	}
-	applyIndexEnvOverrides(fs, &indexOpts)
-	dbConfig, err := configfile.Normalize(configfile.Config{
-		IndexPath:         "/",
-		IndexName:         "root",
-		DBPath:            dbVal,
-		DBBusyTimeout:     *dbBusyTimeout,
-		DBJournalMode:     *dbJournalMode,
-		DBSynchronous:     *dbSynchronous,
-		DBAutoVacuum:      *dbAutoVacuum,
-		DBMaxOpenConns:    *dbMaxOpenConns,
-		DBMaxIdleConns:    *dbMaxIdleConns,
-		DBConnMaxIdleTime: *dbConnMaxIdleTime,
-		SocketPath:        "/var/run/indexer.sock",
-		Interval:          "0",
-	})
+	fileCfg, err := configfile.Load(*configPath)
 	if err != nil {
-		slog.Error("invalid database options", "err", err)
+		slog.Error("failed to load config", "config_file", *configPath, "err", err)
 		os.Exit(1)
 	}
-	dbOptions, err := configfile.DBOpenOptions(dbConfig)
+	fileCfg, err = configfile.ApplyEnvOverrides(fileCfg, os.LookupEnv)
+	if err != nil {
+		slog.Error("invalid environment config override", "err", err)
+		os.Exit(1)
+	}
+	fileCfg, err = applyIndexFlagOverrides(fs, fileCfg, indexFlagValues{
+		indexPath:            indexPath,
+		indexName:            indexName,
+		includeHidden:        includeHidden,
+		includeNetworkMounts: includeNetworkMounts,
+		freshIndex:           freshIndex,
+		keepIndexes:          keepIndexes,
+		dbPath:               dbPath,
+		dbBusyTimeout:        dbBusyTimeout,
+		dbJournalMode:        dbJournalMode,
+		dbSynchronous:        dbSynchronous,
+		dbAutoVacuum:         dbAutoVacuum,
+		dbMaxOpenConns:       dbMaxOpenConns,
+		dbMaxIdleConns:       dbMaxIdleConns,
+		dbConnMaxIdleTime:    dbConnMaxIdleTime,
+	})
+	if err != nil {
+		slog.Error("invalid command-line config override", "err", err)
+		os.Exit(1)
+	}
+	if flagWasSet(fs, "path") && !flagWasSet(fs, "name") {
+		fileCfg.IndexName = configfile.DeriveIndexName(fileCfg.IndexPath)
+	}
+
+	if fileCfg.IndexPath == "" {
+		slog.Error("missing required flag", "flag", "--path")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	dbOptions, err := configfile.DBOpenOptions(fileCfg)
 	if err != nil {
 		slog.Error("invalid database options", "err", err)
 		os.Exit(1)
 	}
 
 	if err := withCPUProfile(*cpuProfile, func() error {
-		return cmd.RunIndexMode(nameVal, *indexPath, *includeHidden, indexOpts.IncludeNetworkMounts, indexOpts.FreshIndex, dbVal, indexOpts.KeepIndexes, dbOptions)
+		return cmd.RunIndexMode(fileCfg.IndexName, fileCfg.IndexPath, fileCfg.IncludeHidden, fileCfg.IncludeNetworkMounts, fileCfg.FreshIndex, fileCfg.DBPath, fileCfg.KeepIndexes, dbOptions)
 	}); err != nil {
 		slog.Error("index failed", "err", err)
 		os.Exit(1)
 	}
+}
+
+type indexFlagValues struct {
+	indexPath            *string
+	indexName            *string
+	includeHidden        *bool
+	includeNetworkMounts *bool
+	freshIndex           *bool
+	keepIndexes          *int
+	dbPath               *string
+	dbBusyTimeout        *string
+	dbJournalMode        *string
+	dbSynchronous        *string
+	dbAutoVacuum         *string
+	dbMaxOpenConns       *int
+	dbMaxIdleConns       *int
+	dbConnMaxIdleTime    *string
+}
+
+func applyIndexFlagOverrides(fs *flag.FlagSet, cfg configfile.Config, values indexFlagValues) (configfile.Config, error) {
+	var patch configfile.Patch
+	if flagWasSet(fs, "path") {
+		patch.IndexPath = values.indexPath
+	}
+	if flagWasSet(fs, "name") {
+		patch.IndexName = values.indexName
+	}
+	if flagWasSet(fs, "include-hidden") {
+		patch.IncludeHidden = values.includeHidden
+	}
+	if flagWasSet(fs, "include-network-mounts") || flagWasSet(fs, "include-external-mounts") {
+		patch.IncludeNetworkMounts = values.includeNetworkMounts
+	}
+	if flagWasSet(fs, "fresh") {
+		patch.FreshIndex = values.freshIndex
+	}
+	if flagWasSet(fs, "keep-indexes") {
+		patch.KeepIndexes = values.keepIndexes
+	}
+	if flagWasSet(fs, "db-path") {
+		patch.DBPath = values.dbPath
+	}
+	if flagWasSet(fs, "db-busy-timeout") {
+		patch.DBBusyTimeout = values.dbBusyTimeout
+	}
+	if flagWasSet(fs, "db-journal-mode") {
+		patch.DBJournalMode = values.dbJournalMode
+	}
+	if flagWasSet(fs, "db-synchronous") {
+		patch.DBSynchronous = values.dbSynchronous
+	}
+	if flagWasSet(fs, "db-auto-vacuum") {
+		patch.DBAutoVacuum = values.dbAutoVacuum
+	}
+	if flagWasSet(fs, "db-max-open-conns") {
+		patch.DBMaxOpenConns = values.dbMaxOpenConns
+	}
+	if flagWasSet(fs, "db-max-idle-conns") {
+		patch.DBMaxIdleConns = values.dbMaxIdleConns
+	}
+	if flagWasSet(fs, "db-conn-max-idle-time") {
+		patch.DBConnMaxIdleTime = values.dbConnMaxIdleTime
+	}
+	return configfile.ApplyPatch(cfg, patch)
+}
+
+func fileExists(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 func withCPUProfile(path string, run func() error) error {

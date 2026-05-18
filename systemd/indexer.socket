@@ -1,6 +1,5 @@
 [Unit]
 Description=Indexer API Socket
-PartOf=indexer.service
 
 [Socket]
 ListenStream=/var/run/indexer.sock

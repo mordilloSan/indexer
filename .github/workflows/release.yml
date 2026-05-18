@@ -73,6 +73,8 @@ jobs:
           mkdir -p dist
           cp systemd/indexer.service dist/indexer.service
           cp systemd/indexer.socket dist/indexer.socket
+          cp systemd/indexer-index.service dist/indexer-index.service
+          cp systemd/indexer-index.timer dist/indexer-index.timer
           template="scripts/global_install.sh"
           if [ ! -f "$template" ]; then
             template="installer/scripts/global_install.sh"
@@ -89,4 +91,6 @@ jobs:
             dist/indexer-linux-amd64
             dist/indexer.service
             dist/indexer.socket
+            dist/indexer-index.service
+            dist/indexer-index.timer
             dist/indexer-install.sh

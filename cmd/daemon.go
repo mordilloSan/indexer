@@ -36,6 +36,7 @@ type DaemonConfig struct {
 	SocketPath           string
 	ListenAddr           string
 	Interval             time.Duration
+	IdleTimeout          time.Duration
 	ConfigPath           string
 }
 
@@ -52,6 +53,8 @@ type daemon struct {
 	workStreamMu     sync.RWMutex
 	workStream       *workStreamBroadcaster
 	usedSystemdSock  bool
+	activeRequests   atomic.Int64
+	lastActivityUnix atomic.Int64
 }
 
 const databaseCheckTimeout = 30 * time.Second
@@ -119,7 +122,7 @@ func NewDaemon(cfg DaemonConfig) (*daemon, error) {
 		cfg.ConfigPath = configfile.PathFromEnvOrDefault()
 	}
 
-	db, dbExisted, err := openDatabaseWithIntegrityCheck(cfg.DBPath, cfg.DBOptions)
+	db, err := storage.OpenWithOptions(cfg.DBPath, cfg.DBOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -132,10 +135,6 @@ func NewDaemon(cfg DaemonConfig) (*daemon, error) {
 		slog.Warn("failed to determine database journal_mode", "err", err)
 	} else {
 		slog.Info("database journal_mode", "mode", strings.ToUpper(journalMode))
-	}
-
-	if dbExisted {
-		logLatestIndexStatus(db)
 	}
 
 	savedConfig, err := daemonConfigToFileConfig(cfg)
@@ -272,10 +271,20 @@ func systemdUnixListener() net.Listener {
 	return l
 }
 
-// Run starts the scheduler (if any) and HTTP server, blocks until context is cancelled
+// Run starts the scheduler (if any) and HTTP server, blocks until context is cancelled.
 func (d *daemon) Run(ctx context.Context) error {
-	go d.startScheduler(ctx)
-	return d.startHTTP(ctx)
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	if d.configSnapshot().Interval > 0 {
+		go d.startScheduler(runCtx)
+	}
+	if d.configSnapshot().IdleTimeout > 0 {
+		d.markActivity()
+		go d.stopWhenIdle(runCtx, cancel)
+	}
+
+	return d.startHTTP(runCtx)
 }
 
 // SpawnInitialIndex checks if database needs initial indexing and triggers it if needed
@@ -392,7 +401,7 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 	mux.HandleFunc("/entries", d.handleEntries)
 	mux.HandleFunc("/config", d.handleConfig)
 
-	handler := loggerMiddleware(recoveryMiddleware(mux))
+	handler := d.activityMiddleware(loggerMiddleware(recoveryMiddleware(mux)))
 	errorLog := log.New(httpErrorLogAdapter{}, "", 0)
 
 	errCh := make(chan error, 2)
@@ -433,8 +442,11 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 		return fmt.Errorf("no listeners configured")
 	}
 
-	// Spawn initial index if database is empty (after API is ready)
-	d.SpawnInitialIndex(ctx)
+	if cfg.Interval > 0 {
+		// Spawn initial index only when the built-in scheduler is active. Native
+		// systemd installs use indexer-index.timer for scheduled and first runs.
+		d.SpawnInitialIndex(ctx)
+	}
 
 	select {
 	case <-ctx.Done():
@@ -454,6 +466,49 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 			return nil
 		}
 		return err
+	}
+}
+
+func (d *daemon) markActivity() {
+	d.lastActivityUnix.Store(time.Now().UnixNano())
+}
+
+func (d *daemon) activityMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		d.activeRequests.Add(1)
+		d.markActivity()
+		defer func() {
+			d.activeRequests.Add(-1)
+			d.markActivity()
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (d *daemon) stopWhenIdle(ctx context.Context, cancel context.CancelFunc) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			cfg := d.configSnapshot()
+			if cfg.IdleTimeout <= 0 {
+				continue
+			}
+			last := d.lastActivityUnix.Load()
+			if last == 0 || d.activeRequests.Load() > 0 || d.running.Load() {
+				continue
+			}
+			idleFor := time.Since(time.Unix(0, last))
+			if idleFor >= cfg.IdleTimeout {
+				slog.Info("idle timeout reached; shutting down daemon", "idle_for", idleFor.Truncate(time.Second), "idle_timeout", cfg.IdleTimeout)
+				cancel()
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
@@ -510,16 +565,10 @@ func (d *daemon) runIndexSubprocess(ctx context.Context) error {
 		"--path", cfg.IndexPath,
 		"--name", cfg.IndexName,
 		"--db-path", cfg.DBPath,
-	}
-	if cfg.IncludeHidden {
-		args = append(args, "--include-hidden")
-	}
-	if cfg.IncludeNetworkMounts {
-		args = append(args, "--include-network-mounts")
-	}
-	args = append(args, "--fresh="+strconv.FormatBool(cfg.FreshIndex))
-	if cfg.KeepIndexes > 0 {
-		args = append(args, "--keep-indexes", strconv.Itoa(cfg.KeepIndexes))
+		"--include-hidden=" + strconv.FormatBool(cfg.IncludeHidden),
+		"--include-network-mounts=" + strconv.FormatBool(cfg.IncludeNetworkMounts),
+		"--fresh=" + strconv.FormatBool(cfg.FreshIndex),
+		"--keep-indexes", strconv.Itoa(cfg.KeepIndexes),
 	}
 	args = appendDBOptionArgs(args, cfg.DBOptions)
 
@@ -570,6 +619,16 @@ func RunIndexMode(indexName, indexPath string, includeHidden, includeNetworkMoun
 		"include_network_mounts", includeNetworkMounts,
 		"keep_indexes", keepIndexes,
 	)
+
+	lock, err := tryAcquireOperationLock(dbPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := lock.Close(); err != nil {
+			slog.Warn("failed to release operation lock", "err", err)
+		}
+	}()
 
 	db, _, err := openDatabaseWithIntegrityCheck(dbPath, dbOptions)
 	if err != nil {

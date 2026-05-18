@@ -1,0 +1,12 @@
+[Unit]
+Description=Run indexer indexing job on a schedule
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+AccuracySec=1min
+Persistent=true
+Unit=indexer-index.service
+
+[Install]
+WantedBy=timers.target

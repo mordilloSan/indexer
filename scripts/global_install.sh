@@ -73,6 +73,8 @@ binary_name="${INDEXER_BINARY_NAME:-indexer}"
 asset_bin="${binary_name}-${os}-${arch}"
 asset_service="indexer.service"
 asset_socket="indexer.socket"
+asset_index_service="indexer-index.service"
+asset_index_timer="indexer-index.timer"
 
 download() {
   local url="$1"
@@ -119,6 +121,18 @@ if systemctl list-unit-files | grep -q '^indexer.socket'; then
   systemctl disable indexer.socket 2>/dev/null || true
 fi
 
+if systemctl list-unit-files | grep -q '^indexer-index.timer'; then
+  echo -e "${YELLOW}Stopping existing indexer-index.timer (if running)...${NC}"
+  systemctl stop indexer-index.timer 2>/dev/null || true
+  echo -e "${YELLOW}Disabling existing indexer-index.timer...${NC}"
+  systemctl disable indexer-index.timer 2>/dev/null || true
+fi
+
+if systemctl list-unit-files | grep -q '^indexer-index.service'; then
+  echo -e "${YELLOW}Stopping existing indexer-index.service (if running)...${NC}"
+  systemctl stop indexer-index.service 2>/dev/null || true
+fi
+
 echo -e "${YELLOW}[1/5]${NC} Downloading ${asset_bin} (${version})..."
 bin_path="${tmpdir}/${asset_bin}"
 download "$(release_url "$asset_bin")" "$bin_path"
@@ -131,10 +145,16 @@ echo -e "${GREEN}✓${NC} Binary installed"
 echo -e "${YELLOW}[3/5]${NC} Installing systemd files to ${systemd_dir}..."
 svc_path="${tmpdir}/${asset_service}"
 sock_path="${tmpdir}/${asset_socket}"
+index_svc_path="${tmpdir}/${asset_index_service}"
+index_timer_path="${tmpdir}/${asset_index_timer}"
 download "$(release_url "$asset_service")" "$svc_path"
 download "$(release_url "$asset_socket")" "$sock_path"
+download "$(release_url "$asset_index_service")" "$index_svc_path"
+download "$(release_url "$asset_index_timer")" "$index_timer_path"
 install -m 0644 "$svc_path" "${systemd_dir}/indexer.service"
 install -m 0644 "$sock_path" "${systemd_dir}/indexer.socket"
+install -m 0644 "$index_svc_path" "${systemd_dir}/indexer-index.service"
+install -m 0644 "$index_timer_path" "${systemd_dir}/indexer-index.timer"
 echo -e "${GREEN}✓${NC} Systemd files installed"
 
 mkdir -p /var/lib/indexer
@@ -168,13 +188,13 @@ EOF
   echo -e "${GREEN}✓${NC} /etc/indexer/config.json created (edit to suit your system)"
 fi
 
-echo -e "${YELLOW}[4/5]${NC} Enabling systemd socket and service..."
+echo -e "${YELLOW}[4/5]${NC} Enabling systemd socket and timer..."
 systemctl daemon-reload
 systemctl enable indexer.socket
-systemctl enable indexer.service
+systemctl enable indexer-index.timer
 systemctl start indexer.socket
-systemctl start indexer.service
-echo -e "${GREEN}✓${NC} Socket and service started${NC}"
+systemctl start indexer-index.timer
+echo -e "${GREEN}✓${NC} Socket and timer started${NC}"
 
 echo -e "${YELLOW}[5/5]${NC} Verifying installation..."
 sleep 1
@@ -186,10 +206,10 @@ else
   exit 1
 fi
 
-if systemctl is-active --quiet indexer.service; then
-  echo -e "${GREEN}✓${NC} Service is active"
+if systemctl is-active --quiet indexer-index.timer; then
+  echo -e "${GREEN}✓${NC} Index timer is active"
 else
-  echo -e "${RED}✗${NC} Service is not active"
+  echo -e "${RED}✗${NC} Index timer is not active"
   exit 1
 fi
 
@@ -199,16 +219,22 @@ echo -e "${YELLOW}Usage:${NC}"
 echo "  Edit configuration:"
 echo "    sudo nano /etc/indexer/config.json"
 echo ""
-echo "  Restart daemon with new settings:"
-echo "    sudo systemctl restart indexer.service"
+echo "  Apply configuration:"
+echo "    sudo indexer config set --interval 6h"
 echo ""
 echo "  Check status:"
 echo "    sudo systemctl status indexer.socket"
+echo "    sudo systemctl status indexer-index.timer"
 echo "    sudo systemctl status indexer.service"
 echo ""
 echo "  View logs:"
 echo "    sudo journalctl -u indexer.service -f"
+echo "    sudo journalctl -u indexer-index.service -f"
 echo ""
 echo "  Manual index (via HTTP API):"
 echo "    sudo curl -X POST --unix-socket /var/run/indexer.sock http://localhost/index"
+echo ""
+echo "  Auto-index interval:"
+echo "    sudo indexer config set --interval 6h"
+echo "    Set to 0 to disable the systemd timer"
 echo ""

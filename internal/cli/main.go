@@ -88,6 +88,7 @@ func runDaemon(args []string) {
 	socketPath := fs.String("socket-path", "", "Unix socket path (\"-\" to disable)")
 	listenAddr := fs.String("listen", "", "Optional TCP address (e.g., :8080)")
 	indexInterval := fs.String("interval", "", "Auto-index interval (Go duration like 6h, 30m); 0 disables")
+	idleTimeout := fs.String("idle-timeout", "0", "Exit after this idle duration (Go duration like 2m); 0 disables")
 	verbose := fs.Bool("verbose", false, "Enable verbose logging")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
@@ -135,6 +136,14 @@ func runDaemon(args []string) {
 		slog.Error("invalid daemon config", "err", err)
 		os.Exit(1)
 	}
+	if *idleTimeout != "" && *idleTimeout != "0" {
+		idleDuration, err := configfile.ParseInterval(*idleTimeout)
+		if err != nil {
+			slog.Error("invalid idle timeout", "err", err)
+			os.Exit(1)
+		}
+		cfg.IdleTimeout = idleDuration
+	}
 
 	d, err := cmd.NewDaemon(cfg)
 	if err != nil {
@@ -161,6 +170,7 @@ func runDaemon(args []string) {
 		"include_network_mounts", cfg.IncludeNetworkMounts,
 		"keep_indexes", cfg.KeepIndexes,
 		"interval", cfg.Interval,
+		"idle_timeout", cfg.IdleTimeout,
 	)
 
 	// Setup graceful shutdown
@@ -214,14 +224,31 @@ func runConfig(args []string) {
 		return
 	}
 	fs := flag.NewFlagSet("config", flag.ExitOnError)
+	configPath := fs.String("config-file", configfile.PathFromEnvOrDefault(), "JSON config file path")
+	runtimeConfig := fs.Bool("runtime", false, "Query the running daemon instead of reading the config file")
 	socketPath := fs.String("socket-path", "/var/run/indexer.sock", "Unix socket path")
 	listenAddr := fs.String("listen", "", "TCP address of the daemon (e.g., :8080)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
 	}
 
-	if err := queryDaemonPretty(*socketPath, *listenAddr, "/config"); err != nil {
+	if *runtimeConfig {
+		if err := queryDaemonPretty(*socketPath, *listenAddr, "/config"); err != nil {
+			fmt.Fprintln(os.Stderr, err.Error())
+			os.Exit(1)
+		}
+		return
+	}
+
+	cfg, err := configfile.Load(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read %s: %v\n", *configPath, err)
+		os.Exit(1)
+	}
+	content, err := configfile.Format(cfg)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
 	}
+	fmt.Print(string(content))
 }

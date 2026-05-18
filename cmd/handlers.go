@@ -84,8 +84,24 @@ func (d *daemon) handleReindex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	lock, err := tryAcquireOperationLock(d.configSnapshot().DBPath)
+	if err != nil {
+		d.unlockIndex()
+		if errors.Is(err, errOperationAlreadyRunning) {
+			http.Error(w, "indexer already running", http.StatusConflict)
+			return
+		}
+		http.Error(w, fmt.Sprintf("operation lock failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	stream := d.beginWorkStream("reindex", normalizedPath)
 	go func() {
+		defer func() {
+			if err := lock.Close(); err != nil {
+				slog.Warn("failed to release operation lock", "err", err)
+			}
+		}()
 		defer d.unlockIndex()
 		defer d.endWorkStream(stream)
 		sendSSEEvent(stream, "started", WorkStartedEvent{
@@ -113,8 +129,24 @@ func (d *daemon) handleVacuum(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	lock, err := tryAcquireOperationLock(d.configSnapshot().DBPath)
+	if err != nil {
+		d.unlockIndex()
+		if errors.Is(err, errOperationAlreadyRunning) {
+			http.Error(w, "indexer already running", http.StatusConflict)
+			return
+		}
+		http.Error(w, fmt.Sprintf("operation lock failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	stream := d.beginWorkStream("vacuum", "")
 	go func() {
+		defer func() {
+			if err := lock.Close(); err != nil {
+				slog.Warn("failed to release operation lock", "err", err)
+			}
+		}()
 		defer d.unlockIndex()
 		defer d.endWorkStream(stream)
 		sendSSEEvent(stream, "started", WorkStartedEvent{
@@ -157,8 +189,24 @@ func (d *daemon) handlePrune(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	lock, err := tryAcquireOperationLock(d.configSnapshot().DBPath)
+	if err != nil {
+		d.unlockIndex()
+		if errors.Is(err, errOperationAlreadyRunning) {
+			http.Error(w, "indexer already running", http.StatusConflict)
+			return
+		}
+		http.Error(w, fmt.Sprintf("operation lock failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	stream := d.beginWorkStream("prune", "")
 	go func() {
+		defer func() {
+			if err := lock.Close(); err != nil {
+				slog.Warn("failed to release operation lock", "err", err)
+			}
+		}()
 		defer d.unlockIndex()
 		defer d.endWorkStream(stream)
 		sendSSEEvent(stream, "started", WorkStartedEvent{
@@ -518,6 +566,21 @@ func (d *daemon) handleAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	lock, err := tryAcquireOperationLock(d.configSnapshot().DBPath)
+	if err != nil {
+		if errors.Is(err, errOperationAlreadyRunning) {
+			http.Error(w, "indexer already running", http.StatusConflict)
+			return
+		}
+		http.Error(w, fmt.Sprintf("operation lock failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		if err := lock.Close(); err != nil {
+			slog.Warn("failed to release operation lock", "err", err)
+		}
+	}()
+
 	indexID, err := d.store.LatestIndexID(ctx)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("no index present: %v", err), http.StatusBadRequest)
@@ -574,6 +637,21 @@ func (d *daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	lock, err := tryAcquireOperationLock(d.configSnapshot().DBPath)
+	if err != nil {
+		if errors.Is(err, errOperationAlreadyRunning) {
+			http.Error(w, "indexer already running", http.StatusConflict)
+			return
+		}
+		http.Error(w, fmt.Sprintf("operation lock failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		if err := lock.Close(); err != nil {
+			slog.Warn("failed to release operation lock", "err", err)
+		}
+	}()
+
 	indexID, err := d.store.LatestIndexID(ctx)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("no index present: %v", err), http.StatusBadRequest)

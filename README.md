@@ -4,7 +4,7 @@
 
 This software was built as proof of concept for a filesystem indexer using a SQLite database, written in Go.
 
-The goal was to have a permanently running daemon with minimal memory footprint, fast(ish) full indexing, and efficient query responses.
+The goal is to provide a low-memory filesystem index with an on-demand API, fast(ish) full indexing, and efficient query responses.
 
 ## Contents
 
@@ -25,11 +25,11 @@ The goal was to have a permanently running daemon with minimal memory footprint,
 
 ## Features
 
-- Daemonized HTTP API on a Unix socket by default; optional TCP listener for remote access.
+- Socket-activated HTTP API on a Unix socket by default; optional TCP listener for remote access.
 - Streaming writes to SQLite (500-entry batches) to keep memory low (~150 MB for ~1M files).
 - Server-Sent Events (SSE) streaming for real-time progress updates during reindex and vacuum operations.
 - Hardlink-aware size accounting so totals match `du`; deleted entries are cleaned after each run.
-- Auto-index on a fixed interval plus manual `/index` endpoint; hidden files and network mounts are opt-in.
+- Systemd timer based auto-indexing plus manual `/index` endpoint; hidden files and network mounts are opt-in.
 - WAL-enabled SQLite schema with incremental auto-vacuum and index pruning for automatic space reclamation.
 - Small store layer for search, dirsize, entry counts, and path queries.
 
@@ -83,9 +83,9 @@ sudo ./scripts/local_install.sh
 
 The script performs the following steps:
 1. Builds the binary and installs it to `/usr/local/bin/indexer`
-2. Installs systemd service and socket units from the `systemd/` directory
+2. Installs systemd service, socket, and timer units from the `systemd/` directory
 3. Creates `/etc/indexer/config.json` configuration file
-4. Enables socket activation and starts the daemon
+4. Enables the API socket and index timer
 5. Verifies the installation
 
 ### Install from GitHub Releases (no Go required)
@@ -102,19 +102,20 @@ To install a specific version:
 curl -fsSL https://github.com/mordilloSan/indexer/releases/download/v1.2.0/indexer-install.sh | sudo bash
 ```
 
-After installation, edit `/etc/indexer/config.json` to configure the path to index, interval, and other options. Systemd socket activation is used by default, so the daemon starts on-demand when the socket is accessed.
+After installation, edit `/etc/indexer/config.json` to configure the path to index, interval, and other options. Systemd socket activation is used by default, so the API daemon starts on demand when the socket is accessed and exits after being idle. Scheduled indexing runs as `indexer-index.service` from `indexer-index.timer`, so no indexer process needs to remain resident between API calls or indexing jobs.
 
 Notes:
 - The installers place the binary at `/usr/local/bin/indexer` (usually already on `$PATH`).
-- When installed via systemd, you typically manage the daemon via `systemctl`, but you can still run `indexer version` / `indexer --help` from your shell.
-- Avoid running a second daemon manually against the same `--socket-path` / `--db-path` while the systemd service is running.
+- When installed via systemd, `indexer.socket` is the always-on API entrypoint and `indexer-index.timer` owns scheduled indexing. You can still run `indexer version` / `indexer --help` from your shell.
+- Avoid running a second daemon manually against the same `--socket-path` / `--db-path` while the systemd socket/service is active.
 
 Quick checks:
 
 ```bash
 command -v indexer || echo "indexer not on PATH (try /usr/local/bin/indexer)"
 indexer version
-sudo systemctl status indexer.service --no-pager
+sudo systemctl status indexer.socket --no-pager
+sudo systemctl status indexer-index.timer --no-pager
 ```
 
 ## CLI flags
@@ -139,15 +140,17 @@ sudo systemctl status indexer.service --no-pager
 | `--socket-path` | `/var/run/indexer.sock` | Unix socket path for API |
 | `--listen` | *(disabled)* | TCP address for HTTP API (e.g., `:8080`) |
 | `--interval` | `1h0m0s` | Auto-index interval (`6h`, `30m`, etc.); `0` disables |
+| `--idle-timeout` | `0` | Daemon-only idle exit timeout; packaged systemd service uses `2m` |
 | `--verbose` | `false` | Enable debug logging |
 
 Daemon config load order is: built-in defaults, JSON config file, `INDEXER_*` environment overrides, then command-line/systemd flags.
 
 Commands:
-- `indexer daemon ...` starts the API daemon and scheduler.
-- `indexer index ...` indexes one folder and exits. It accepts `--path`, `--name`, `--include-hidden`, `--include-network-mounts`, `--fresh`, `--keep-indexes`, database flags, `--cpu-profile`, and `--verbose`.
-- `indexer status` and `indexer config` query a running daemon.
-- `indexer setup` opens a plain terminal wizard for editing the JSON config file and restarting the service.
+- `indexer daemon ...` starts the API daemon. The built-in scheduler still works when `--interval` is non-zero, but native systemd units disable it and use `indexer-index.timer`.
+- `indexer index ...` indexes one folder and exits. It accepts `--config-file`, `--path`, `--name`, `--include-hidden`, `--include-network-mounts`, `--fresh`, `--keep-indexes`, database flags, `--cpu-profile`, and `--verbose`.
+- `indexer status` queries the API daemon and may socket-activate it.
+- `indexer config` reads the JSON config file by default; add `--runtime` to query the daemon.
+- `indexer setup` opens a plain terminal wizard for editing the JSON config file and applying systemd timer/socket changes.
 - `indexer version` prints version/build info.
 
 On startup (CLI or systemd), `indexer` logs its version/build info.
@@ -389,7 +392,7 @@ curl --unix-socket /tmp/indexer.sock -X PUT http://localhost/config \
   -d '{"index_path":"/data","interval":"6h"}'
 ```
 
-The daemon validates the JSON, writes the config file atomically, and applies runtime-safe fields immediately. Changes to `db_path`, any `db_*` SQLite setting, `socket_path`, or `listen_addr` are persisted but require a daemon restart to fully take effect; those responses include `X-Indexer-Restart-Required: true`.
+The daemon validates the JSON, writes the config file atomically, and applies runtime-safe fields immediately. Changes to `db_path`, any `db_*` SQLite setting, `socket_path`, or `listen_addr` are persisted but require the disposable API daemon to restart to fully take effect; those responses include `X-Indexer-Restart-Required: true`.
 
 #### `GET /openapi.json`
 
@@ -414,6 +417,7 @@ indexer/
 ├── cmd/
 │   ├── daemon.go        # HTTP server (Unix socket + TCP) setup
 │   ├── handlers.go      # API request handlers
+│   ├── operation_lock.go # Cross-process guard for indexing/maintenance writes
 │   └── handlers_sse.go  # Server-Sent Events streaming handlers
 ├── storage/
 │   ├── db.go            # SQLite schema and core database operations
@@ -582,7 +586,8 @@ The `db_journal_mode`, `db_synchronous`, `db_auto_vacuum`, and connection pool f
 Apply changes:
 
 ```bash
-sudo systemctl restart indexer.service
+sudo indexer config set --interval 6h
+sudo indexer config set --path "/media/My Drive"
 ```
 
 You can also use the built-in setup wizard:
@@ -597,7 +602,7 @@ For scripts or one-off edits, `indexer config set` updates the same file without
 sudo indexer config set --path "/media/My Drive" --interval 6h
 ```
 
-Add `--dry-run` to either command to print the resulting JSON file without writing it or restarting the service.
+On native systemd installs, `indexer config set --interval ...` also updates `/etc/systemd/system/indexer-index.timer.d/override.conf` and restarts the timer. `--interval 0` disables the timer. Socket path changes are applied through an `indexer.socket` drop-in. Add `--dry-run` to either command to print the resulting JSON file without writing it or applying systemd changes.
 
 The daemon also exposes `GET /config` and Unix-socket-only `PUT /config` for settings UIs. Socket permissions are the local guard; the packaged systemd socket uses `0660`.
 
@@ -607,6 +612,7 @@ Service files are available in the `systemd/` directory for reference.
 
 - Indexing speed: ~50k files/sec on SSD (warm cache)
 - Memory usage: ~150 MB for ~1M files in streaming mode
+- Native systemd installs keep no `indexer` process resident while the API is idle and no scheduled index job is running
 - DB size: ~500 bytes per entry (WAL enabled)
 - Search latency: typically <10 ms for substring queries
 

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mordilloSan/indexer/internal/configfile"
 )
@@ -205,6 +206,79 @@ func TestApplyIndexEnvOverridesKeepsExplicitFlags(t *testing.T) {
 	}
 	if opts.KeepIndexes != 2 {
 		t.Fatalf("KeepIndexes = %d, want 2", opts.KeepIndexes)
+	}
+}
+
+func TestApplyIndexFlagOverridesUsesConfigAndExplicitFlags(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	path := fs.String("path", "", "")
+	name := fs.String("name", "", "")
+	includeHidden := fs.Bool("include-hidden", false, "")
+	includeNetworkMounts := fs.Bool("include-network-mounts", false, "")
+	fs.BoolVar(includeNetworkMounts, "include-external-mounts", false, "")
+	fresh := fs.Bool("fresh", false, "")
+	keepIndexes := fs.Int("keep-indexes", 0, "")
+	dbPath := fs.String("db-path", "", "")
+	dbBusyTimeout := fs.String("db-busy-timeout", "", "")
+	dbJournalMode := fs.String("db-journal-mode", "", "")
+	dbSynchronous := fs.String("db-synchronous", "", "")
+	dbAutoVacuum := fs.String("db-auto-vacuum", "", "")
+	dbMaxOpenConns := fs.Int("db-max-open-conns", 0, "")
+	dbMaxIdleConns := fs.Int("db-max-idle-conns", 0, "")
+	dbConnMaxIdleTime := fs.String("db-conn-max-idle-time", "", "")
+	if err := fs.Parse([]string{"--path=/media", "--include-hidden=false", "--keep-indexes=3"}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+
+	base := configfile.Defaults()
+	base.IndexPath = "/data"
+	base.IndexName = "data"
+	base.IncludeHidden = true
+	next, err := applyIndexFlagOverrides(fs, base, indexFlagValues{
+		indexPath:            path,
+		indexName:            name,
+		includeHidden:        includeHidden,
+		includeNetworkMounts: includeNetworkMounts,
+		freshIndex:           fresh,
+		keepIndexes:          keepIndexes,
+		dbPath:               dbPath,
+		dbBusyTimeout:        dbBusyTimeout,
+		dbJournalMode:        dbJournalMode,
+		dbSynchronous:        dbSynchronous,
+		dbAutoVacuum:         dbAutoVacuum,
+		dbMaxOpenConns:       dbMaxOpenConns,
+		dbMaxIdleConns:       dbMaxIdleConns,
+		dbConnMaxIdleTime:    dbConnMaxIdleTime,
+	})
+	if err != nil {
+		t.Fatalf("applyIndexFlagOverrides: %v", err)
+	}
+
+	if next.IndexPath != "/media" {
+		t.Fatalf("IndexPath = %q, want /media", next.IndexPath)
+	}
+	if next.IncludeHidden {
+		t.Fatalf("IncludeHidden = true, want false")
+	}
+	if next.KeepIndexes != 3 {
+		t.Fatalf("KeepIndexes = %d, want 3", next.KeepIndexes)
+	}
+	if next.IndexName != "data" {
+		t.Fatalf("IndexName = %q, want existing config name", next.IndexName)
+	}
+}
+
+func TestSystemdDurationRoundsUpToSeconds(t *testing.T) {
+	tests := map[time.Duration]string{
+		0:                         "0",
+		500 * time.Millisecond:    "1s",
+		90 * time.Second:          "90s",
+		6*time.Hour + time.Second: "21601s",
+	}
+	for input, want := range tests {
+		if got := systemdDuration(input); got != want {
+			t.Fatalf("systemdDuration(%s) = %q, want %q", input, got, want)
+		}
 	}
 }
 

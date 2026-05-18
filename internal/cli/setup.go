@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 
@@ -220,13 +219,16 @@ func runSetup(args []string) {
 	noRestart := fs.Bool("no-restart", false, "Skip service restart after updating")
 	dryRun := fs.Bool("dry-run", false, "Print the resulting config file without writing or restarting")
 	service := fs.String("service", defaultServiceName, "Systemd service name")
+	socketUnit := fs.String("socket-unit", defaultSocketUnit, "Systemd socket unit name")
+	timer := fs.String("timer", defaultTimerUnit, "Systemd index timer unit name")
+	runtimeConfig := fs.Bool("runtime", false, "Read current values from the running daemon")
 	socketPath := fs.String("socket-path", "/var/run/indexer.sock", "Unix socket path for reading current daemon config")
 	listenAddr := fs.String("listen", "", "TCP address for reading current daemon config (e.g. :8080)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
 	}
 
-	cfg, source, err := loadSetupConfig(*configPath, *socketPath, *listenAddr)
+	cfg, source, err := loadSetupConfig(*configPath, *socketPath, *listenAddr, *runtimeConfig)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
@@ -269,17 +271,22 @@ func runSetup(args []string) {
 	fmt.Printf("updated %s\n", *configPath)
 
 	if !*noRestart {
-		fmt.Printf("restarting %s...\n", *service)
-		out, err := exec.Command("systemctl", "restart", *service).CombinedOutput()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "restart failed: %v\n%s\n", err, strings.TrimSpace(string(out)))
+		patch := configPatchForSystemdApply(fileCfg)
+		if err := applySystemdConfigChanges(patch, fileCfg, *service, *socketUnit, *timer); err != nil {
+			fmt.Fprintln(os.Stderr, err.Error())
 			os.Exit(1)
 		}
-		fmt.Println("done")
 	}
 }
 
-func loadSetupConfig(configPath, socketPath, listenAddr string) (setupConfig, string, error) {
+func configPatchForSystemdApply(cfg configfile.Config) configfile.Patch {
+	return configfile.Patch{
+		SocketPath: &cfg.SocketPath,
+		Interval:   &cfg.Interval,
+	}
+}
+
+func loadSetupConfig(configPath, socketPath, listenAddr string, runtimeConfig bool) (setupConfig, string, error) {
 	cfg := defaultSetupConfig()
 	source := "built-in defaults"
 
@@ -294,14 +301,16 @@ func loadSetupConfig(configPath, socketPath, listenAddr string) (setupConfig, st
 		return cfg, "", fmt.Errorf("stat %s: %w", configPath, err)
 	}
 
-	daemonCfg, err := queryDaemonSetupConfig(socketPath, listenAddr)
-	if err == nil {
-		return daemonCfg, "running daemon", nil
-	}
-	if source == "built-in defaults" {
-		source = "built-in defaults (daemon not reachable)"
-	} else {
-		source = fmt.Sprintf("%s (daemon not reachable)", source)
+	if runtimeConfig {
+		daemonCfg, err := queryDaemonSetupConfig(socketPath, listenAddr)
+		if err == nil {
+			return daemonCfg, "running daemon", nil
+		}
+		if source == "built-in defaults" {
+			source = "built-in defaults (daemon not reachable)"
+		} else {
+			source = fmt.Sprintf("%s (daemon not reachable)", source)
+		}
 	}
 	return cfg, source, nil
 }

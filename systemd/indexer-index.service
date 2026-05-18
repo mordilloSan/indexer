@@ -1,13 +1,11 @@
 [Unit]
-Description=Indexer daemon with Unix socket API
-After=network.target indexer.socket
-Requires=indexer.socket
+Description=Indexer scheduled indexing job
+After=network.target
 
 [Service]
-Type=simple
+Type=oneshot
 ExecStartPre=/bin/sh -c 'if [ ! -f /etc/indexer/config.json ]; then echo "indexer: /etc/indexer/config.json missing; using built-in defaults"; fi'
-ExecStart=/usr/local/bin/indexer daemon --config-file /etc/indexer/config.json --interval=0 --idle-timeout=2m
-Restart=on-failure
+ExecStart=/usr/local/bin/indexer index --config-file /etc/indexer/config.json
 RuntimeDirectory=indexer
 RuntimeDirectoryMode=0755
 NoNewPrivileges=true
