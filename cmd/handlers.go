@@ -42,7 +42,7 @@ func (d *daemon) handleIndex(w http.ResponseWriter, r *http.Request) {
 			Operation: "index",
 		})
 
-		if err := d.runIndexSubprocess(d.bgCtx); err != nil {
+		if err := d.runIndexSubprocess(d.backgroundContext()); err != nil {
 			slog.Error("manual index failed", "err", err)
 			sendSSEError(stream, fmt.Sprintf("index failed: %v", err))
 			return
@@ -108,7 +108,7 @@ func (d *daemon) handleReindex(w http.ResponseWriter, r *http.Request) {
 			Operation: "reindex",
 			Path:      normalizedPath,
 		})
-		d.reindexPathWithProgress(d.bgCtx, normalizedPath, stream)
+		d.reindexPathWithProgress(d.backgroundContext(), normalizedPath, stream)
 	}()
 
 	writeJSONStatus(w, http.StatusAccepted, map[string]string{
@@ -152,7 +152,7 @@ func (d *daemon) handleVacuum(w http.ResponseWriter, r *http.Request) {
 			Status:    "running",
 			Operation: "vacuum",
 		})
-		d.vacuumWithProgress(d.bgCtx, stream)
+		d.vacuumWithProgress(d.backgroundContext(), stream)
 	}()
 
 	writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "running"})
@@ -218,7 +218,7 @@ func (d *daemon) handlePrune(w http.ResponseWriter, r *http.Request) {
 			Status:    "running",
 			Operation: "prune",
 		})
-		d.pruneWithProgress(d.bgCtx, keepLatest, maxAgeDays, stream)
+		d.pruneWithProgress(d.backgroundContext(), keepLatest, maxAgeDays, stream)
 	}()
 
 	writeJSONStatus(w, http.StatusAccepted, map[string]string{

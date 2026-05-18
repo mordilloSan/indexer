@@ -147,6 +147,7 @@ func NewDaemon(cfg DaemonConfig) (*daemon, error) {
 		return nil, err
 	}
 
+	bgCtx, bgCancel := context.WithCancel(context.Background())
 	return &daemon{
 		cfg:              cfg,
 		savedConfig:      savedConfig,
@@ -154,6 +155,8 @@ func NewDaemon(cfg DaemonConfig) (*daemon, error) {
 		activeSocketPath: cfg.SocketPath,
 		db:               db,
 		store:            storage.NewStoreWithDB(db, cfg.DBPath),
+		bgCtx:            bgCtx,
+		bgCancel:         bgCancel,
 	}, nil
 }
 
@@ -279,10 +282,23 @@ func systemdUnixListener() net.Listener {
 }
 
 // Run starts the scheduler (if any) and HTTP server, blocks until context is cancelled.
+// backgroundContext returns the daemon-lifetime context used by async handler
+// goroutines. Falls back to context.Background() for tests that construct a
+// daemon directly without going through NewDaemon/Run.
+func (d *daemon) backgroundContext() context.Context {
+	if d.bgCtx != nil {
+		return d.bgCtx
+	}
+	return context.Background()
+}
+
 func (d *daemon) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	if d.bgCancel != nil {
+		d.bgCancel()
+	}
 	d.bgCtx = runCtx
 	d.bgCancel = cancel
 
