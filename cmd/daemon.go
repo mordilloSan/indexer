@@ -138,6 +138,7 @@ func NewDaemon(cfg DaemonConfig) (*daemon, error) {
 	} else {
 		slog.Info("database journal_mode", "mode", strings.ToUpper(journalMode))
 	}
+	logLatestIndexStatus(db)
 
 	savedConfig, err := daemonConfigToFileConfig(cfg)
 	if err != nil {

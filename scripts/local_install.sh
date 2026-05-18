@@ -19,6 +19,13 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # Stop/disable any existing services and socket to avoid conflicts during install
+if systemctl list-unit-files | grep -q '^indexer.target'; then
+    echo -e "${YELLOW}Stopping existing indexer.target (if running)...${NC}"
+    systemctl stop indexer.target 2>/dev/null || true
+    echo -e "${YELLOW}Disabling existing indexer.target...${NC}"
+    systemctl disable indexer.target 2>/dev/null || true
+fi
+
 if systemctl list-unit-files | grep -q '^indexer.service'; then
     echo -e "${YELLOW}Stopping existing indexer.service (if running)...${NC}"
     systemctl stop indexer.service 2>/dev/null || true
@@ -66,6 +73,7 @@ cp systemd/indexer.service /etc/systemd/system/
 cp systemd/indexer.socket /etc/systemd/system/
 cp systemd/indexer-index.service /etc/systemd/system/
 cp systemd/indexer-index.timer /etc/systemd/system/
+cp systemd/indexer.target /etc/systemd/system/
 echo -e "${GREEN}✓${NC} Systemd files installed"
 
 # Ensure data and config directories exist
@@ -101,14 +109,12 @@ EOF
     echo -e "${GREEN}✓${NC} /etc/indexer/config.json created (edit to suit your system)"
 fi
 
-# Step 4: Reload systemd and enable socket + timer
-echo -e "${YELLOW}[4/5]${NC} Enabling systemd socket and timer..."
+# Step 4: Reload systemd and enable target
+echo -e "${YELLOW}[4/5]${NC} Enabling systemd target..."
 systemctl daemon-reload
-systemctl enable indexer.socket
-systemctl enable indexer-index.timer
-systemctl start indexer.socket
-systemctl start indexer-index.timer
-echo -e "${GREEN}✓${NC} Socket and timer started${NC}"
+systemctl enable indexer.target
+systemctl start indexer.target
+echo -e "${GREEN}✓${NC} Target started${NC}"
 
 # Step 5: Verify installation
 echo -e "${YELLOW}[5/5]${NC} Verifying installation..."
@@ -136,9 +142,11 @@ echo "  Edit configuration:"
 echo "    sudo nano /etc/indexer/config.json"
 echo ""
 echo "  Apply configuration:"
+echo "    sudo indexer config apply"
 echo "    sudo indexer config set --interval 6h"
 echo ""
 echo "  Check status:"
+echo "    sudo systemctl status indexer.target"
 echo "    sudo systemctl status indexer.socket"
 echo "    sudo systemctl status indexer-index.timer"
 echo "    sudo systemctl status indexer.service"
@@ -146,6 +154,9 @@ echo ""
 echo "  View logs:"
 echo "    sudo journalctl -u indexer.service -f"
 echo "    sudo journalctl -u indexer-index.service -f"
+echo ""
+echo "  Dashboard:"
+echo "    sudo indexer dashboard"
 echo ""
 echo "  Manual index (via HTTP API):"
 echo "    sudo curl -X POST --unix-socket /var/run/indexer.sock http://localhost/index"

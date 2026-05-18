@@ -2,6 +2,7 @@
 Description=Indexer daemon with Unix socket API
 After=network.target indexer.socket
 Requires=indexer.socket
+PartOf=indexer.target
 
 [Service]
 Type=simple

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -36,24 +38,40 @@ func displayOptional(value, fallback string) string {
 	return value
 }
 
-func sanitizeName(name, path string) string {
-	if name != "" {
-		return name
+func appendf(b *strings.Builder, format string, args ...any) {
+	if _, err := fmt.Fprintf(b, format, args...); err != nil {
+		panic(fmt.Errorf("append formatted text: %w", err))
 	}
-	name = strings.ReplaceAll(path, "/", "_")
-	if name == "" || name == "_" {
-		return "root"
-	}
-	return strings.Trim(name, "_")
 }
 
-func coalesce(values ...string) string {
-	for _, v := range values {
-		if v != "" {
-			return v
-		}
+func writeOrExit(w io.Writer, args ...any) {
+	if _, err := fmt.Fprint(w, args...); err != nil {
+		handleCLIWriteError(err)
 	}
-	return ""
+}
+
+func writefOrExit(w io.Writer, format string, args ...any) {
+	if _, err := fmt.Fprintf(w, format, args...); err != nil {
+		handleCLIWriteError(err)
+	}
+}
+
+func writelnOrExit(w io.Writer, args ...any) {
+	if _, err := fmt.Fprintln(w, args...); err != nil {
+		handleCLIWriteError(err)
+	}
+}
+
+func handleCLIWriteError(err error) {
+	if errors.Is(err, syscall.EPIPE) {
+		os.Exit(1)
+	}
+
+	message := "indexer: write output failed: " + err.Error() + "\n"
+	if _, reportErr := os.Stderr.WriteString(message); reportErr != nil {
+		slog.Error("failed to write CLI output and error report", "err", err, "report_err", reportErr)
+	}
+	os.Exit(1)
 }
 
 func parseInterval(s string) (time.Duration, error) {
@@ -74,8 +92,8 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 }
 
 func envBool(name string) bool {
-	v, _ := parseBool(os.Getenv(name))
-	return v
+	v, ok := parseBool(os.Getenv(name))
+	return ok && v
 }
 
 func envInt(name string, fallback int) int {

@@ -16,16 +16,47 @@ import (
 const (
 	defaultSocketUnit = "indexer.socket"
 	defaultTimerUnit  = "indexer-index.timer"
+	defaultTargetUnit = "indexer.target"
 )
+
+var (
+	systemdSystemDir    = "/etc/systemd/system"
+	systemCommandOutput = func(name string, args ...string) ([]byte, error) {
+		return exec.Command(name, args...).CombinedOutput()
+	}
+)
+
+func runConfigApply(args []string) {
+	fs := flag.NewFlagSet("config apply", flag.ExitOnError)
+	configPath := fs.String("config-file", configfile.PathFromEnvOrDefault(), "JSON config file to apply")
+	service := fs.String("service", defaultServiceUnit, "Systemd service unit name")
+	socketUnit := fs.String("socket-unit", defaultSocketUnit, "Systemd socket unit name")
+	timer := fs.String("timer", defaultTimerUnit, "Systemd index timer unit name")
+	target := fs.String("target", defaultTargetUnit, "Systemd target unit name")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	cfg, err := configfile.Load(*configPath)
+	if err != nil {
+		writefOrExit(os.Stderr, "read %s: %v\n", *configPath, err)
+		os.Exit(1)
+	}
+	if err := applySystemdConfig(cfg, *service, *socketUnit, *timer, *target); err != nil {
+		writelnOrExit(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+}
 
 func runConfigSet(args []string) {
 	fs := flag.NewFlagSet("config set", flag.ExitOnError)
 	configPath := fs.String("config-file", configfile.PathFromEnvOrDefault(), "JSON config file to update")
 	noRestart := fs.Bool("no-restart", false, "Skip service restart after updating")
 	dryRun := fs.Bool("dry-run", false, "Print the resulting config file without writing or restarting")
-	service := fs.String("service", defaultServiceName, "Systemd service name")
+	service := fs.String("service", defaultServiceUnit, "Systemd service unit name")
 	socketUnit := fs.String("socket-unit", defaultSocketUnit, "Systemd socket unit name")
 	timer := fs.String("timer", defaultTimerUnit, "Systemd index timer unit name")
+	target := fs.String("target", defaultTargetUnit, "Systemd target unit name")
 
 	path := fs.String("path", "", "Path to index")
 	name := fs.String("name", "", "Index name")
@@ -51,39 +82,39 @@ func runConfigSet(args []string) {
 
 	patch := collectConfigPatch(fs, path, name, includeHidden, includeNetworkMounts, fresh, keepIndexes, dbPath, dbBusyTimeout, dbJournalMode, dbSynchronous, dbAutoVacuum, dbMaxOpenConns, dbMaxIdleConns, dbConnMaxIdleTime, socketPath, interval, listen)
 	if patchIsEmpty(patch) {
-		fmt.Fprintln(os.Stderr, "no settings specified; use flags like --interval=2h or --path=/data")
+		writelnOrExit(os.Stderr, "no settings specified; use flags like --interval=2h or --path=/data")
 		fs.Usage()
 		os.Exit(1)
 	}
 
 	current, err := configfile.Load(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "read %s: %v\n", *configPath, err)
+		writefOrExit(os.Stderr, "read %s: %v\n", *configPath, err)
 		os.Exit(1)
 	}
 	next, err := configfile.ApplyPatch(current, patch)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
+		writelnOrExit(os.Stderr, err.Error())
 		os.Exit(1)
 	}
 
 	if *dryRun {
 		if err := printConfigDryRun(*configPath, next); err != nil {
-			fmt.Fprintf(os.Stderr, "format %s: %v\n", *configPath, err)
+			writefOrExit(os.Stderr, "format %s: %v\n", *configPath, err)
 			os.Exit(1)
 		}
 		return
 	}
 
 	if err := configfile.Save(*configPath, next); err != nil {
-		fmt.Fprintf(os.Stderr, "write %s: %v\n", *configPath, err)
+		writefOrExit(os.Stderr, "write %s: %v\n", *configPath, err)
 		os.Exit(1)
 	}
-	fmt.Printf("updated %s\n", *configPath)
+	writefOrExit(os.Stdout, "updated %s\n", *configPath)
 
 	if !*noRestart {
-		if err := applySystemdConfigChanges(patch, next, *service, *socketUnit, *timer); err != nil {
-			fmt.Fprintln(os.Stderr, err.Error())
+		if err := applySystemdConfigChanges(patch, next, *service, *socketUnit, *timer, *target); err != nil {
+			writelnOrExit(os.Stderr, err.Error())
 			os.Exit(1)
 		}
 	}
@@ -94,7 +125,7 @@ func printConfigDryRun(configPath string, cfg configfile.Config) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("dry run: would write %s:\n%s", configPath, content)
+	writefOrExit(os.Stdout, "dry run: would write %s:\n%s", configPath, content)
 	return nil
 }
 
@@ -161,14 +192,22 @@ func patchIsEmpty(patch configfile.Patch) bool {
 		patch.Interval == nil
 }
 
-func applySystemdConfigChanges(patch configfile.Patch, cfg configfile.Config, service, socketUnit, timer string) error {
+func applySystemdConfigChanges(patch configfile.Patch, cfg configfile.Config, service, socketUnit, timer, target string) error {
+	targetNeedsUpdate := false
 	if patch.Interval != nil {
 		if err := applySystemdTimerInterval(cfg.Interval, timer); err != nil {
 			return err
 		}
+		targetNeedsUpdate = true
 	}
 	if patch.SocketPath != nil {
 		if err := applySystemdSocketPath(cfg.SocketPath, socketUnit); err != nil {
+			return err
+		}
+		targetNeedsUpdate = true
+	}
+	if targetNeedsUpdate {
+		if err := applySystemdTargetWants(cfg, target, socketUnit, timer); err != nil {
 			return err
 		}
 	}
@@ -178,12 +217,20 @@ func applySystemdConfigChanges(patch configfile.Patch, cfg configfile.Config, se
 	return nil
 }
 
+func applySystemdConfig(cfg configfile.Config, service, socketUnit, timer, target string) error {
+	patch := configfile.Patch{
+		SocketPath: &cfg.SocketPath,
+		Interval:   &cfg.Interval,
+	}
+	return applySystemdConfigChanges(patch, cfg, service, socketUnit, timer, target)
+}
+
 func applySystemdSocketPath(socketPath, socketUnit string) error {
 	if strings.TrimSpace(socketPath) == "" {
 		if err := runSystemctl("disable", "--now", socketUnit); err != nil {
 			return err
 		}
-		fmt.Printf("disabled %s\n", socketUnit)
+		writefOrExit(os.Stdout, "disabled %s\n", socketUnit)
 		return nil
 	}
 	if err := writeSocketOverride(socketUnit, socketPath); err != nil {
@@ -198,7 +245,7 @@ func applySystemdSocketPath(socketPath, socketUnit string) error {
 	if err := runSystemctl("restart", socketUnit); err != nil {
 		return err
 	}
-	fmt.Printf("updated %s path to %s\n", socketUnit, socketPath)
+	writefOrExit(os.Stdout, "updated %s path to %s\n", socketUnit, socketPath)
 	return nil
 }
 
@@ -211,7 +258,7 @@ func applySystemdTimerInterval(interval, timer string) error {
 		if err := runSystemctl("disable", "--now", timer); err != nil {
 			return err
 		}
-		fmt.Printf("disabled %s\n", timer)
+		writefOrExit(os.Stdout, "disabled %s\n", timer)
 		return nil
 	}
 
@@ -227,12 +274,46 @@ func applySystemdTimerInterval(interval, timer string) error {
 	if err := runSystemctl("restart", timer); err != nil {
 		return err
 	}
-	fmt.Printf("updated %s interval to %s\n", timer, duration)
+	writefOrExit(os.Stdout, "updated %s interval to %s\n", timer, duration)
 	return nil
 }
 
+func applySystemdTargetWants(cfg configfile.Config, target, socketUnit, timer string) error {
+	wants, err := targetWantsForConfig(cfg, socketUnit, timer)
+	if err != nil {
+		return err
+	}
+	if err := writeTargetOverride(target, wants); err != nil {
+		return err
+	}
+	if err := runSystemctl("daemon-reload"); err != nil {
+		return err
+	}
+	wantsLabel := strings.Join(wants, " ")
+	if wantsLabel == "" {
+		wantsLabel = "(none)"
+	}
+	writefOrExit(os.Stdout, "updated %s wants to %s\n", target, wantsLabel)
+	return nil
+}
+
+func targetWantsForConfig(cfg configfile.Config, socketUnit, timer string) ([]string, error) {
+	var wants []string
+	if strings.TrimSpace(cfg.SocketPath) != "" {
+		wants = append(wants, socketUnit)
+	}
+	duration, err := configfile.ParseInterval(cfg.Interval)
+	if err != nil {
+		return nil, err
+	}
+	if duration > 0 {
+		wants = append(wants, timer)
+	}
+	return wants, nil
+}
+
 func writeTimerOverride(timer string, interval time.Duration) error {
-	dir := filepath.Join("/etc/systemd/system", timer+".d")
+	dir := filepath.Join(systemdSystemDir, timer+".d")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create timer override directory: %w", err)
 	}
@@ -245,7 +326,7 @@ func writeTimerOverride(timer string, interval time.Duration) error {
 }
 
 func writeSocketOverride(socketUnit, socketPath string) error {
-	dir := filepath.Join("/etc/systemd/system", socketUnit+".d")
+	dir := filepath.Join(systemdSystemDir, socketUnit+".d")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create socket override directory: %w", err)
 	}
@@ -253,6 +334,22 @@ func writeSocketOverride(socketUnit, socketPath string) error {
 	path := filepath.Join(dir, "override.conf")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("write socket override %s: %w", path, err)
+	}
+	return nil
+}
+
+func writeTargetOverride(target string, wants []string) error {
+	dir := filepath.Join(systemdSystemDir, target+".d")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create target override directory: %w", err)
+	}
+	content := "[Unit]\nWants=\n"
+	if len(wants) > 0 {
+		content += "Wants=" + strings.Join(wants, " ") + "\n"
+	}
+	path := filepath.Join(dir, "override.conf")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write target override %s: %w", path, err)
 	}
 	return nil
 }
@@ -272,7 +369,7 @@ func systemdDuration(duration time.Duration) string {
 }
 
 func runSystemctl(args ...string) error {
-	out, err := exec.Command("systemctl", args...).CombinedOutput()
+	out, err := systemCommandOutput("systemctl", args...)
 	if err != nil {
 		return fmt.Errorf("systemctl %s failed: %v\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}

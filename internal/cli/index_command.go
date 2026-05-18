@@ -192,7 +192,7 @@ func withCPUProfile(path string, run func() error) error {
 	}
 	defer func() {
 		if closeErr := f.Close(); closeErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to close cpu profile: %v\n", closeErr)
+			slog.Warn("failed to close cpu profile", "err", closeErr)
 		}
 	}()
 

@@ -79,7 +79,7 @@ func queryDaemon(socketPath, listenAddr, endpoint string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(strings.TrimSpace(string(body)))
+	writelnOrExit(os.Stdout, strings.TrimSpace(string(body)))
 	return nil
 }
 
@@ -92,25 +92,35 @@ func queryDaemonPretty(socketPath, listenAddr, endpoint string) error {
 
 	var out any
 	if err := json.Unmarshal(body, &out); err != nil {
-		fmt.Println(strings.TrimSpace(string(body)))
+		writelnOrExit(os.Stdout, strings.TrimSpace(string(body)))
 		return nil
 	}
 	pretty, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
-		fmt.Println(strings.TrimSpace(string(body)))
+		writelnOrExit(os.Stdout, strings.TrimSpace(string(body)))
 		return nil
 	}
-	fmt.Println(string(pretty))
+	writelnOrExit(os.Stdout, string(pretty))
 	return nil
 }
 
 func fetchDaemonBody(socketPath, listenAddr, endpoint string) ([]byte, error) {
+	return daemonBodyFetcher(http.MethodGet, socketPath, listenAddr, endpoint)
+}
+
+func postDaemonBody(socketPath, listenAddr, endpoint string) ([]byte, error) {
+	return daemonBodyFetcher(http.MethodPost, socketPath, listenAddr, endpoint)
+}
+
+var daemonBodyFetcher = daemonBody
+
+func daemonBody(method, socketPath, listenAddr, endpoint string) ([]byte, error) {
 	client, url, err := buildClient(socketPath, listenAddr, endpoint)
 	if err != nil {
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequest(method, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -121,7 +131,7 @@ func fetchDaemonBody(socketPath, listenAddr, endpoint string) ([]byte, error) {
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to close response body: %v\n", closeErr)
+			writefOrExit(os.Stderr, "warning: failed to close response body: %v\n", closeErr)
 		}
 	}()
 

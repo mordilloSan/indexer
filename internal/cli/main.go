@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -16,7 +15,9 @@ import (
 )
 
 const (
-	defaultServiceName = "indexer"
+	defaultServiceName      = "indexer"
+	defaultServiceUnit      = "indexer.service"
+	defaultIndexServiceUnit = "indexer-index.service"
 )
 
 const usageText = `Usage: indexer <command> [flags]
@@ -26,10 +27,23 @@ Commands:
   index     Index one folder and exit
   status    Query status from a running daemon
   config    Show configuration of a running daemon
+  service   Manage systemd units
+  dashboard Full-screen status dashboard
   setup     Interactive systemd configuration wizard
   version   Print version information
 
 Run 'indexer <command> --help' for details on a specific command.
+`
+
+const configUsageText = `Usage: indexer config [flags]
+       indexer config apply [flags]
+       indexer config set [flags]
+
+Commands:
+  apply  Sync the JSON config to systemd target/socket/timer drop-ins
+  set    Update JSON config fields and apply related systemd changes
+
+Without a subcommand, reads the JSON config file. Add --runtime to query the daemon.
 `
 
 func Main(args []string) {
@@ -40,7 +54,7 @@ func Main(args []string) {
 	}
 
 	if len(args) < 1 {
-		fmt.Fprint(os.Stderr, usageText)
+		writeOrExit(os.Stderr, usageText)
 		os.Exit(1)
 	}
 
@@ -53,15 +67,19 @@ func Main(args []string) {
 		runStatus(args[1:])
 	case "config":
 		runConfig(args[1:])
+	case "service":
+		runService(args[1:])
+	case "dashboard":
+		runDashboard(args[1:])
 	case "setup":
 		runSetup(args[1:])
 	case "version":
-		fmt.Println(version.String())
+		writelnOrExit(os.Stdout, version.String())
 	case "--help", "-h", "help":
-		fmt.Print(usageText)
+		writeOrExit(os.Stdout, usageText)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", args[0])
-		fmt.Fprint(os.Stderr, usageText)
+		writefOrExit(os.Stderr, "unknown command: %s\n\n", args[0])
+		writeOrExit(os.Stderr, usageText)
 		os.Exit(1)
 	}
 }
@@ -213,17 +231,30 @@ func runStatus(args []string) {
 	}
 
 	if err := queryDaemon(*socketPath, *listenAddr, "/status"); err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
+		writelnOrExit(os.Stderr, err.Error())
 		os.Exit(1)
 	}
 }
 
 func runConfig(args []string) {
+	if len(args) > 0 && args[0] == "apply" {
+		runConfigApply(args[1:])
+		return
+	}
 	if len(args) > 0 && args[0] == "set" {
 		runConfigSet(args[1:])
 		return
 	}
+	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
+		writeOrExit(os.Stdout, configUsageText)
+		return
+	}
 	fs := flag.NewFlagSet("config", flag.ExitOnError)
+	fs.Usage = func() {
+		writeOrExit(fs.Output(), configUsageText)
+		writelnOrExit(fs.Output(), "\nFlags:")
+		fs.PrintDefaults()
+	}
 	configPath := fs.String("config-file", configfile.PathFromEnvOrDefault(), "JSON config file path")
 	runtimeConfig := fs.Bool("runtime", false, "Query the running daemon instead of reading the config file")
 	socketPath := fs.String("socket-path", "/var/run/indexer.sock", "Unix socket path")
@@ -234,7 +265,7 @@ func runConfig(args []string) {
 
 	if *runtimeConfig {
 		if err := queryDaemonPretty(*socketPath, *listenAddr, "/config"); err != nil {
-			fmt.Fprintln(os.Stderr, err.Error())
+			writelnOrExit(os.Stderr, err.Error())
 			os.Exit(1)
 		}
 		return
@@ -242,13 +273,13 @@ func runConfig(args []string) {
 
 	cfg, err := configfile.Load(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "read %s: %v\n", *configPath, err)
+		writefOrExit(os.Stderr, "read %s: %v\n", *configPath, err)
 		os.Exit(1)
 	}
 	content, err := configfile.Format(cfg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
+		writelnOrExit(os.Stderr, err.Error())
 		os.Exit(1)
 	}
-	fmt.Print(string(content))
+	writeOrExit(os.Stdout, string(content))
 }

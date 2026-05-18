@@ -1,6 +1,7 @@
 [Unit]
 Description=Indexer scheduled indexing job
 After=network.target
+PartOf=indexer.target
 
 [Service]
 Type=oneshot

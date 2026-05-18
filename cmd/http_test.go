@@ -84,7 +84,10 @@ func TestHandleAddAndDelete(t *testing.T) {
 		"type":   "file",
 		"hidden": false,
 	}
-	body, _ := json.Marshal(addPayload)
+	body, err := json.Marshal(addPayload)
+	if err != nil {
+		t.Fatalf("marshal add payload: %v", err)
+	}
 	req := httptest.NewRequest(http.MethodPost, "/add", bytes.NewReader(body))
 	rr := httptest.NewRecorder()
 	d.handleAdd(rr, req)
@@ -190,7 +193,10 @@ func TestHandleDeleteDirectorySubtree(t *testing.T) {
 			"type":   "file",
 			"hidden": false,
 		}
-		body, _ := json.Marshal(payload)
+		body, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal add payload: %v", err)
+		}
 		req := httptest.NewRequest(http.MethodPost, "/add", bytes.NewReader(body))
 		rec := httptest.NewRecorder()
 		d.handleAdd(rec, req)

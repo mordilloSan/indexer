@@ -83,7 +83,9 @@ func TestOperationLockOpenFailure(t *testing.T) {
 		t.Fatalf("chmod parent: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = os.Chmod(parent, 0o700)
+		if err := os.Chmod(parent, 0o700); err != nil {
+			t.Errorf("restore parent mode: %v", err)
+		}
 	})
 
 	dbPath := filepath.Join(parent, "index.db")

@@ -75,6 +75,7 @@ jobs:
           cp systemd/indexer.socket dist/indexer.socket
           cp systemd/indexer-index.service dist/indexer-index.service
           cp systemd/indexer-index.timer dist/indexer-index.timer
+          cp systemd/indexer.target dist/indexer.target
           template="scripts/global_install.sh"
           if [ ! -f "$template" ]; then
             template="installer/scripts/global_install.sh"
@@ -93,4 +94,5 @@ jobs:
             dist/indexer.socket
             dist/indexer-index.service
             dist/indexer-index.timer
+            dist/indexer.target
             dist/indexer-install.sh

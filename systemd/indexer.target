@@ -1,0 +1,6 @@
+[Unit]
+Description=Indexer API socket and scheduled indexing
+Wants=indexer.socket indexer-index.timer
+
+[Install]
+WantedBy=multi-user.target

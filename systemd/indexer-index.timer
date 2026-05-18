@@ -1,5 +1,6 @@
 [Unit]
 Description=Run indexer indexing job on a schedule
+PartOf=indexer.target
 
 [Timer]
 OnBootSec=5min

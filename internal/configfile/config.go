@@ -521,7 +521,9 @@ func writeFileAtomic(path string, data []byte, defaultMode os.FileMode) (err err
 	removeTmp := true
 	defer func() {
 		if removeTmp {
-			_ = os.Remove(tmpName)
+			if removeErr := os.Remove(tmpName); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				err = errors.Join(err, fmt.Errorf("remove temp file %s: %w", tmpName, removeErr))
+			}
 		}
 	}()
 
@@ -582,27 +584,30 @@ func atomicWriteAttrs(path string, defaultMode os.FileMode) (atomicFileAttrs, er
 
 func prepareTempFile(tmp *os.File, tmpName string, attrs atomicFileAttrs, data []byte) error {
 	if err := tmp.Chmod(attrs.mode); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("chmod temp file %s: %w", tmpName, err)
+		return closeTempAfterError(tmp, tmpName, fmt.Errorf("chmod temp file %s: %w", tmpName, err))
 	}
 	if attrs.uid >= 0 && attrs.gid >= 0 {
 		if err := tmp.Chown(attrs.uid, attrs.gid); err != nil {
-			_ = tmp.Close()
-			return fmt.Errorf("chown temp file %s: %w", tmpName, err)
+			return closeTempAfterError(tmp, tmpName, fmt.Errorf("chown temp file %s: %w", tmpName, err))
 		}
 	}
 	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("write temp file %s: %w", tmpName, err)
+		return closeTempAfterError(tmp, tmpName, fmt.Errorf("write temp file %s: %w", tmpName, err))
 	}
 	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("sync temp file %s: %w", tmpName, err)
+		return closeTempAfterError(tmp, tmpName, fmt.Errorf("sync temp file %s: %w", tmpName, err))
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp file %s: %w", tmpName, err)
 	}
 	return nil
+}
+
+func closeTempAfterError(tmp *os.File, tmpName string, primary error) error {
+	if closeErr := tmp.Close(); closeErr != nil {
+		return errors.Join(primary, fmt.Errorf("close temp file %s after error: %w", tmpName, closeErr))
+	}
+	return primary
 }
 
 func syncDir(dir string) (err error) {

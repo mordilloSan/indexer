@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -103,14 +104,16 @@ func appendField(buf *bytes.Buffer, name, value string) {
 	buf.WriteByte('\n')
 }
 
-func (s *nativeSender) sendLargePayload(payload []byte) error {
+func (s *nativeSender) sendLargePayload(payload []byte) (err error) {
 	file, err := createPayloadMemfd()
 	if err != nil {
 		return err
 	}
-	// The fd is passed to journald via SCM_RIGHTS below; closing our local
-	// copy just decrements the refcount, so the close error is safe to drop.
-	defer func() { _ = file.Close() }()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close journald payload fd: %w", closeErr))
+		}
+	}()
 
 	if _, writeErr := file.Write(payload); writeErr != nil {
 		return writeErr

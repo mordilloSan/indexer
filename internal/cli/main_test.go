@@ -151,10 +151,13 @@ func TestApplyIndexEnvOverrides(t *testing.T) {
 	t.Setenv("INDEXER_KEEP_INDEXES", "4")
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	_ = fs.Bool("fresh", true, "")
+	freshFlag := fs.Bool("fresh", true, "")
 	includeNetworkMounts := fs.Bool("include-network-mounts", false, "")
 	fs.BoolVar(includeNetworkMounts, "include-external-mounts", false, "")
-	_ = fs.Int("keep-indexes", 0, "")
+	keepIndexesFlag := fs.Int("keep-indexes", 0, "")
+	if freshFlag == nil || keepIndexesFlag == nil {
+		t.Fatalf("expected flag pointers to be registered")
+	}
 	if err := fs.Parse(nil); err != nil {
 		t.Fatalf("parse flags: %v", err)
 	}

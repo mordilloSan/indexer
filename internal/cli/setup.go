@@ -218,9 +218,10 @@ func runSetup(args []string) {
 	configPath := fs.String("config-file", configfile.PathFromEnvOrDefault(), "JSON config file to update")
 	noRestart := fs.Bool("no-restart", false, "Skip service restart after updating")
 	dryRun := fs.Bool("dry-run", false, "Print the resulting config file without writing or restarting")
-	service := fs.String("service", defaultServiceName, "Systemd service name")
+	service := fs.String("service", defaultServiceUnit, "Systemd service unit name")
 	socketUnit := fs.String("socket-unit", defaultSocketUnit, "Systemd socket unit name")
 	timer := fs.String("timer", defaultTimerUnit, "Systemd index timer unit name")
+	target := fs.String("target", defaultTargetUnit, "Systemd target unit name")
 	runtimeConfig := fs.Bool("runtime", false, "Read current values from the running daemon")
 	socketPath := fs.String("socket-path", "/var/run/indexer.sock", "Unix socket path for reading current daemon config")
 	listenAddr := fs.String("listen", "", "TCP address for reading current daemon config (e.g. :8080)")
@@ -230,50 +231,50 @@ func runSetup(args []string) {
 
 	cfg, source, err := loadSetupConfig(*configPath, *socketPath, *listenAddr, *runtimeConfig)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
+		writelnOrExit(os.Stderr, err.Error())
 		os.Exit(1)
 	}
 
-	fmt.Println("Indexer Setup")
-	fmt.Println("-------------")
-	fmt.Printf("Using current values from %s.\n", source)
-	fmt.Println("Press Enter to keep the value in brackets.")
-	fmt.Println()
+	writelnOrExit(os.Stdout, "Indexer Setup")
+	writelnOrExit(os.Stdout, "-------------")
+	writefOrExit(os.Stdout, "Using current values from %s.\n", source)
+	writelnOrExit(os.Stdout, "Press Enter to keep the value in brackets.")
+	writelnOrExit(os.Stdout)
 
 	reader := bufio.NewReader(os.Stdin)
 	cfg, apply, err := runSetupWizard(reader, os.Stdout, cfg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
+		writelnOrExit(os.Stderr, err.Error())
 		os.Exit(1)
 	}
 	if !apply {
-		fmt.Println("canceled")
+		writelnOrExit(os.Stdout, "canceled")
 		return
 	}
 
 	fileCfg, err := setupConfigToFileConfig(cfg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
+		writelnOrExit(os.Stderr, err.Error())
 		os.Exit(1)
 	}
 	if *dryRun {
 		if err := printConfigDryRun(*configPath, fileCfg); err != nil {
-			fmt.Fprintf(os.Stderr, "format %s: %v\n", *configPath, err)
+			writefOrExit(os.Stderr, "format %s: %v\n", *configPath, err)
 			os.Exit(1)
 		}
 		return
 	}
 
 	if err := configfile.Save(*configPath, fileCfg); err != nil {
-		fmt.Fprintf(os.Stderr, "write %s: %v\n", *configPath, err)
+		writefOrExit(os.Stderr, "write %s: %v\n", *configPath, err)
 		os.Exit(1)
 	}
-	fmt.Printf("updated %s\n", *configPath)
+	writefOrExit(os.Stdout, "updated %s\n", *configPath)
 
 	if !*noRestart {
 		patch := configPatchForSystemdApply(fileCfg)
-		if err := applySystemdConfigChanges(patch, fileCfg, *service, *socketUnit, *timer); err != nil {
-			fmt.Fprintln(os.Stderr, err.Error())
+		if err := applySystemdConfigChanges(patch, fileCfg, *service, *socketUnit, *timer, *target); err != nil {
+			writelnOrExit(os.Stderr, err.Error())
 			os.Exit(1)
 		}
 	}
@@ -493,7 +494,9 @@ func runSetupWizard(reader *bufio.Reader, w io.Writer, cfg setupConfig) (setupCo
 		}
 		n, err := strconv.Atoi(choice)
 		if err != nil || n < 1 || n > len(setupFields) {
-			_, _ = fmt.Fprintf(w, "Enter a field number from 1 to %d, apply, or cancel.\n", len(setupFields))
+			if _, err := fmt.Fprintf(w, "Enter a field number from 1 to %d, apply, or cancel.\n", len(setupFields)); err != nil {
+				return cfg, false, err
+			}
 			continue
 		}
 		cfg, err = promptSetupField(reader, w, cfg, n)
@@ -507,10 +510,10 @@ func printSetupSummary(w io.Writer, cfg setupConfig) error {
 	var sb strings.Builder
 	sb.WriteString("\nReview\n------\n")
 	for i, f := range setupFields {
-		fmt.Fprintf(&sb, " %2d. %s: %s\n", i+1, f.Label, f.Value(cfg))
+		appendf(&sb, " %2d. %s: %s\n", i+1, f.Label, f.Value(cfg))
 	}
 	if cfg.ListenFlag != "" && strings.TrimSpace(cfg.ListenAddr) == "" {
-		fmt.Fprintf(&sb, "     Preserved INDEXER_LISTEN_FLAG: %s\n", cfg.ListenFlag)
+		appendf(&sb, "     Preserved INDEXER_LISTEN_FLAG: %s\n", cfg.ListenFlag)
 	}
 	sb.WriteByte('\n')
 	_, err := io.WriteString(w, sb.String())
@@ -531,7 +534,9 @@ func promptRequiredString(reader *bufio.Reader, w io.Writer, label, current stri
 			return current, err
 		}
 		if strings.TrimSpace(value) == "" {
-			_, _ = fmt.Fprintln(w, "Value cannot be empty.")
+			if _, err := fmt.Fprintln(w, "Value cannot be empty."); err != nil {
+				return current, err
+			}
 			continue
 		}
 		return strings.TrimSpace(value), nil
@@ -556,7 +561,9 @@ func promptInterval(reader *bufio.Reader, w io.Writer, label, current string) (s
 			return current, err
 		}
 		if _, err := parseInterval(value); err != nil {
-			_, _ = fmt.Fprintf(w, "Invalid duration %q. Use values like 30m, 1h, 6h, or 0.\n", value)
+			if _, err := fmt.Fprintf(w, "Invalid duration %q. Use values like 30m, 1h, 6h, or 0.\n", value); err != nil {
+				return current, err
+			}
 			continue
 		}
 		return value, nil
@@ -565,7 +572,9 @@ func promptInterval(reader *bufio.Reader, w io.Writer, label, current string) (s
 
 func promptListenAddr(reader *bufio.Reader, w io.Writer, currentAddr, currentFlag string) (string, string, error) {
 	if currentFlag != "" && strings.TrimSpace(currentAddr) == "" {
-		_, _ = fmt.Fprintf(w, "Existing INDEXER_LISTEN_FLAG %q will be preserved. Enter a listen address to replace it, or type none to clear it.\n", currentFlag)
+		if _, err := fmt.Fprintf(w, "Existing INDEXER_LISTEN_FLAG %q will be preserved. Enter a listen address to replace it, or type none to clear it.\n", currentFlag); err != nil {
+			return currentAddr, currentFlag, err
+		}
 	}
 	value, err := promptLine(reader, w, fmt.Sprintf("TCP listen address (type none to disable) [%s]: ", displayOptional(currentAddr, "disabled")))
 	if err != nil {
@@ -589,7 +598,9 @@ func promptNonNegativeInt(reader *bufio.Reader, w io.Writer, label string, curre
 		}
 		parsed, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil || parsed < 0 {
-			_, _ = fmt.Fprintln(w, "Enter a non-negative integer.")
+			if _, err := fmt.Fprintln(w, "Enter a non-negative integer."); err != nil {
+				return current, err
+			}
 			continue
 		}
 		return parsed, nil
@@ -613,7 +624,9 @@ func promptBool(reader *bufio.Reader, w io.Writer, label string, current bool) (
 		if parsed, ok := parseBool(value); ok {
 			return parsed, nil
 		}
-		_, _ = fmt.Fprintln(w, "Enter yes or no.")
+		if _, err := fmt.Fprintln(w, "Enter yes or no."); err != nil {
+			return current, err
+		}
 	}
 }
 
@@ -629,7 +642,9 @@ func promptString(reader *bufio.Reader, w io.Writer, label, current string) (str
 }
 
 func promptLine(reader *bufio.Reader, w io.Writer, prompt string) (string, error) {
-	_, _ = fmt.Fprint(w, prompt)
+	if _, err := fmt.Fprint(w, prompt); err != nil {
+		return "", err
+	}
 	line, err := reader.ReadString('\n')
 	if err != nil && err != io.EOF {
 		return "", err

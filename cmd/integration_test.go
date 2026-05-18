@@ -457,7 +457,10 @@ func TestAddDeleteSizePropagation(t *testing.T) {
 		"type":   "file",
 		"hidden": false,
 	}
-	body, _ := json.Marshal(addPayload)
+	body, err := json.Marshal(addPayload)
+	if err != nil {
+		t.Fatalf("marshal add payload: %v", err)
+	}
 	addReq := httptest.NewRequest(http.MethodPost, "/add", bytes.NewReader(body))
 	addRR := httptest.NewRecorder()
 	d.handleAdd(addRR, addReq)
