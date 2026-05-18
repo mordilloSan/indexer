@@ -31,7 +31,7 @@ The goal was to have a permanently running daemon with minimal memory footprint,
 - Hardlink-aware size accounting so totals match `du`; deleted entries are cleaned after each run.
 - Auto-index on a fixed interval plus manual `/index` endpoint; hidden files and network mounts are opt-in.
 - WAL-enabled SQLite schema with incremental auto-vacuum and index pruning for automatic space reclamation.
-- Small store layer for search, dirsize, and path queries.
+- Small store layer for search, dirsize, entry counts, and path queries.
 
 ## Quickstart
 
@@ -270,6 +270,21 @@ curl --unix-socket /tmp/indexer.sock 'http://localhost/entries?path=/home&recurs
 
 If there is no index yet, the endpoint returns an empty list.
 
+#### `GET /entrycount?path=<path>`
+
+Count files and directories at and under a path. The path itself is included when it exists in the latest index, so counting a directory includes that directory entry in `dirs`; counting an indexed file returns `files: 1, dirs: 0`.
+
+```bash
+curl --unix-socket /tmp/indexer.sock 'http://localhost/entrycount?path=/home'
+```
+
+Response:
+```json
+{"path":"/home","files":42891,"dirs":1320}
+```
+
+The `path` parameter defaults to `/` if omitted. For `path=/`, the root `/` directory entry is included, so `dirs` is one greater than the `/status` `num_dirs` value, which tracks child directories only. If there is no index yet, or the path is not present in the latest index, the endpoint returns zero counts.
+
 #### `GET /subfolders?path=<path>`
 
 Get direct child folders of a path with their pre-calculated sizes (non-recursive). This is useful for building directory browsers or disk usage visualizations.
@@ -378,7 +393,7 @@ The daemon validates the JSON, writes the config file atomically, and applies ru
 
 #### `GET /openapi.json`
 
-OpenAPI 3.0 document for the API (version 2.2.0).
+OpenAPI 3.0 document for the API (version 2.3.0).
 
 ## Architecture
 
@@ -402,7 +417,7 @@ indexer/
 │   └── handlers_sse.go  # Server-Sent Events streaming handlers
 ├── storage/
 │   ├── db.go            # SQLite schema and core database operations
-│   ├── queries.go       # Query API (search, dirsize, entries, subfolders)
+│   ├── queries.go       # Query API (search, dirsize, entrycount, entries, subfolders)
 │   └── maintenance.go   # Vacuum and pruning helpers
 └── indexing/
     ├── traversal.go     # Filesystem traversal

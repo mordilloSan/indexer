@@ -459,6 +459,24 @@ func (d *daemon) handleDirSize(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (d *daemon) handleEntryCount(w http.ResponseWriter, r *http.Request) {
+	path, ok := queryPathOrRoot(r.URL.Query().Get("path"))
+	if !ok {
+		http.Error(w, "invalid path: path traversal not allowed", http.StatusBadRequest)
+		return
+	}
+	files, dirs, err := d.store.EntryCount(r.Context(), path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"path":  path,
+		"files": files,
+		"dirs":  dirs,
+	})
+}
+
 func (d *daemon) handleSubfolders(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	path, ok := queryPathOrRoot(r.URL.Query().Get("path"))
@@ -670,7 +688,7 @@ func serveOpenapi(w http.ResponseWriter, r *http.Request) {
 
 const openapiSpec = `{
   "openapi": "3.0.0",
-  "info": { "title": "Indexer API", "version": "2.2.0" },
+  "info": { "title": "Indexer API", "version": "2.3.0" },
   "paths": {
     "/index": { "post": { "summary": "Trigger full index", "responses": { "202": {"description": "Started"}, "409": {"description": "Already running"} } } },
     "/reindex": { "post": { "summary": "Reindex a specific path", "parameters": [{ "in": "query", "name": "path", "required": true, "schema": {"type": "string"}, "description": "Path to reindex (e.g., /home/user)" }], "responses": { "202": {"description": "Started"}, "400": {"description": "Path required"}, "409": {"description": "Already running"} } } },
@@ -680,6 +698,7 @@ const openapiSpec = `{
     "/search": { "get": { "summary": "Search entries (returns type: folder/file)", "parameters": [{ "in": "query", "name": "q", "schema": {"type": "string"} }, { "in": "query", "name": "limit", "schema": {"type": "integer"} }], "responses": { "200": {"description": "Results with type field indicating folder or file"} } } },
     "/subfolders": { "get": { "summary": "Get direct subfolders with sizes", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"}, "description": "Parent path (defaults to /)" }], "responses": { "200": {"description": "Array of direct subfolders with their sizes"} } } },
     "/dirsize": { "get": { "summary": "Directory size", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"} }], "responses": { "200": {"description": "Size"} } } },
+    "/entrycount": { "get": { "summary": "Count files and directories at and under a path (recursive, includes the path itself)", "description": "Returns counts of all entries with relative_path equal to or under the given path. The path itself is included: for path=/foo, /foo counts in dirs; for path=/, the root / entry counts in dirs. Because indexes.num_dirs excludes the root directory, dirs from this endpoint at path=/ will be indexes.num_dirs + 1.", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"}, "description": "Path to count (defaults to /)" }], "responses": { "200": {"description": "{path, files, dirs}"}, "400": {"description": "Invalid path"} } } },
     "/entries": { "get": { "summary": "List entries (returns type: folder/file)", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"} }, { "in": "query", "name": "recursive", "schema": {"type": "boolean"} }, { "in": "query", "name": "limit", "schema": {"type": "integer"} }, { "in": "query", "name": "offset", "schema": {"type": "integer"} }], "responses": { "200": {"description": "Entries with type field indicating folder or file"} } } },
     "/add": { "post": { "summary": "Upsert entry", "responses": { "200": {"description": "OK"} } } },
     "/delete": { "delete": { "summary": "Delete entry", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"} }], "responses": { "200": {"description": "OK"} } } },

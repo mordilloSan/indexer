@@ -671,6 +671,106 @@ func TestHandleDirSize(t *testing.T) {
 	}
 }
 
+// Test /entrycount endpoint
+func TestHandleEntryCount(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+	}()
+
+	d := &daemon{
+		cfg: DaemonConfig{
+			IndexName: "test",
+			IndexPath: "/",
+			DBPath:    dbPath,
+		},
+		db:    db,
+		store: storage.NewStoreWithDB(db, dbPath),
+	}
+
+	if _, err := db.Exec(`
+		INSERT INTO indexes (
+			name, root_path, source, include_hidden,
+			num_dirs, num_files, total_size, disk_used,
+			disk_total, last_indexed, index_duration_ms,
+			export_duration_ms, vacuum_duration_ms
+		) VALUES (?, ?, ?, 0, 0, 0, 0, 0, 0, strftime('%s','now'), 0, 0, 0);
+	`, d.cfg.IndexName, d.cfg.IndexPath, d.cfg.IndexPath); err != nil {
+		t.Fatalf("insert index: %v", err)
+	}
+
+	store := storage.NewStoreWithDB(db, dbPath)
+	indexID, err := store.LatestIndexID(context.Background())
+	if err != nil {
+		t.Fatalf("latest index id: %v", err)
+	}
+
+	entries := []indexing.IndexEntry{
+		{RelativePath: "/", AbsolutePath: "/", Name: "/", Size: 0, ModTime: time.Now(), Type: "directory"},
+		{RelativePath: "/docs", AbsolutePath: "/docs", Name: "docs", Size: 0, ModTime: time.Now(), Type: "directory"},
+		{RelativePath: "/docs/readme.md", AbsolutePath: "/docs/readme.md", Name: "readme.md", Size: 100, ModTime: time.Now(), Type: "file"},
+		{RelativePath: "/docs/intro.md", AbsolutePath: "/docs/intro.md", Name: "intro.md", Size: 200, ModTime: time.Now(), Type: "file"},
+	}
+	for _, e := range entries {
+		if _, err := storage.UpdateEntry(context.Background(), db, indexID, e); err != nil {
+			t.Fatalf("seed %s: %v", e.RelativePath, err)
+		}
+	}
+
+	type response struct {
+		Path  string `json:"path"`
+		Files int64  `json:"files"`
+		Dirs  int64  `json:"dirs"`
+	}
+
+	t.Run("subtree includes self", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/entrycount?path=/docs", nil)
+		rr := httptest.NewRecorder()
+		d.handleEntryCount(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+		}
+		var resp response
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if resp.Path != "/docs" || resp.Files != 2 || resp.Dirs != 1 {
+			t.Fatalf("got %+v, want {/docs 2 1}", resp)
+		}
+	})
+
+	t.Run("no path defaults to root", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/entrycount", nil)
+		rr := httptest.NewRecorder()
+		d.handleEntryCount(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+		}
+		var resp response
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if resp.Path != "/" || resp.Files != 2 || resp.Dirs != 2 {
+			t.Fatalf("got %+v, want {/ 2 2}", resp)
+		}
+	})
+
+	t.Run("traversal rejected", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/entrycount?path=../etc", nil)
+		rr := httptest.NewRecorder()
+		d.handleEntryCount(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+		}
+	})
+}
+
 // Test /subfolders endpoint
 func TestHandleSubfolders(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "index.db")
@@ -904,8 +1004,8 @@ func TestServeOpenapi(t *testing.T) {
 		t.Fatalf("info field missing or invalid")
 	}
 
-	if info["version"] != "2.2.0" {
-		t.Fatalf("API version = %v, want \"2.2.0\"", info["version"])
+	if info["version"] != "2.3.0" {
+		t.Fatalf("API version = %v, want \"2.3.0\"", info["version"])
 	}
 }
 
