@@ -385,6 +385,7 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 	mux.HandleFunc("/status", d.handleStatus)
 	mux.HandleFunc("/search", d.handleSearch)
 	mux.HandleFunc("/dirsize", d.handleDirSize)
+	mux.HandleFunc("/entrycount", d.handleEntryCount)
 	mux.HandleFunc("/subfolders", d.handleSubfolders)
 	mux.HandleFunc("/add", d.handleAdd)
 	mux.HandleFunc("/delete", d.handleDelete)

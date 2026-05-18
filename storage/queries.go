@@ -192,6 +192,53 @@ func (s *Store) DirSize(ctx context.Context, path string) (int64, error) {
 	return 0, nil
 }
 
+// EntryCount returns the number of file and directory entries at and under path.
+// The path itself is included in the counts when present in the index.
+func (s *Store) EntryCount(ctx context.Context, path string) (files int64, dirs int64, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	indexID, err := s.LatestIndexID(ctx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, 0, nil
+		}
+		return 0, 0, fmt.Errorf("failed to get latest index: %w", err)
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+        SELECT type, COUNT(*)
+        FROM entries
+        WHERE index_id = ?
+          AND (relative_path = ? OR relative_path LIKE ? ESCAPE '\')
+        GROUP BY type
+    `, indexID, path, SubtreeLikePattern(path))
+	if err != nil {
+		return 0, 0, fmt.Errorf("entry count query failed: %w", err)
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil {
+			slog.Warn("rows close failed", "query", "entrycount", "err", cerr)
+		}
+	}()
+
+	for rows.Next() {
+		var typ string
+		var count int64
+		if err := rows.Scan(&typ, &count); err != nil {
+			return 0, 0, fmt.Errorf("scan failed: %w", err)
+		}
+		switch typ {
+		case "file":
+			files = count
+		case "directory":
+			dirs = count
+		}
+	}
+	return files, dirs, rows.Err()
+}
+
 // UpsertEntry inserts or replaces a single entry (used for manual updates via API).
 // Path should be the relative path (e.g., "/dir/file.txt"), absPath is the full filesystem path.
 func (s *Store) UpsertEntry(ctx context.Context, indexID int64, entry EntryResult, absPath, typ string, hidden bool) error {

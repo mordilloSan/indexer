@@ -209,6 +209,95 @@ func TestDeletePathRecursiveEscapesLikeWildcards(t *testing.T) {
 	}
 }
 
+func TestEntryCount(t *testing.T) {
+	t.Run("empty db returns zeros", func(t *testing.T) {
+		ctx, db, dbPath := setupTestDB(t)
+		store := NewStoreWithDB(db, dbPath)
+		files, dirs, err := store.EntryCount(ctx, "/")
+		if err != nil {
+			t.Fatalf("entry count: %v", err)
+		}
+		if files != 0 || dirs != 0 {
+			t.Fatalf("empty db counts = (files=%d, dirs=%d), want (0, 0)", files, dirs)
+		}
+	})
+
+	t.Run("mixed tree includes self", func(t *testing.T) {
+		ctx, db, dbPath := setupTestDB(t)
+		indexID := insertTestIndex(t, db)
+		seedDirectories(t, ctx, db, indexID, []directorySeed{
+			{path: "/", size: 0},
+			{path: "/a", size: 100},
+			{path: "/b", size: 200},
+		})
+		file := indexing.IndexEntry{
+			RelativePath: "/a/file.txt",
+			AbsolutePath: "/a/file.txt",
+			Name:         "file.txt",
+			Size:         42,
+			ModTime:      time.Now(),
+			Type:         "file",
+		}
+		if _, err := UpdateEntry(ctx, db, indexID, file); err != nil {
+			t.Fatalf("seed file: %v", err)
+		}
+
+		store := NewStoreWithDB(db, dbPath)
+
+		files, dirs, err := store.EntryCount(ctx, "/")
+		if err != nil {
+			t.Fatalf("root count: %v", err)
+		}
+		if dirs != 3 || files != 1 {
+			t.Fatalf("root counts = (files=%d, dirs=%d), want (1, 3)", files, dirs)
+		}
+
+		files, dirs, err = store.EntryCount(ctx, "/a")
+		if err != nil {
+			t.Fatalf("subtree count: %v", err)
+		}
+		if dirs != 1 || files != 1 {
+			t.Fatalf("/a counts = (files=%d, dirs=%d), want (1, 1)", files, dirs)
+		}
+
+		files, dirs, err = store.EntryCount(ctx, "/a/file.txt")
+		if err != nil {
+			t.Fatalf("file path count: %v", err)
+		}
+		if files != 1 || dirs != 0 {
+			t.Fatalf("/a/file.txt counts = (files=%d, dirs=%d), want (1, 0)", files, dirs)
+		}
+
+		files, dirs, err = store.EntryCount(ctx, "/does/not/exist")
+		if err != nil {
+			t.Fatalf("nonexistent path count: %v", err)
+		}
+		if files != 0 || dirs != 0 {
+			t.Fatalf("nonexistent counts = (files=%d, dirs=%d), want (0, 0)", files, dirs)
+		}
+	})
+
+	t.Run("escapes LIKE wildcards", func(t *testing.T) {
+		ctx, db, dbPath := setupTestDB(t)
+		indexID := insertTestIndex(t, db)
+		seedDirectories(t, ctx, db, indexID, []directorySeed{
+			{path: "/data%_set", size: 150},
+			{path: "/data%_set/child", size: 50},
+			{path: "/dataXXset", size: 275},
+			{path: "/dataXXset/child", size: 75},
+		})
+
+		store := NewStoreWithDB(db, dbPath)
+		files, dirs, err := store.EntryCount(ctx, "/data%_set")
+		if err != nil {
+			t.Fatalf("escaped count: %v", err)
+		}
+		if dirs != 2 || files != 0 {
+			t.Fatalf("/data%%_set counts = (files=%d, dirs=%d), want (0, 2)", files, dirs)
+		}
+	})
+}
+
 type folderExpectation struct {
 	name string
 	size int64
