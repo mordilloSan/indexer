@@ -581,7 +581,11 @@ func (d *daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	relPath := indexing.NormalizeIndexPath(path)
-	if err := d.store.DeleteEntryWithSizeUpdate(ctx, indexID, relPath); err != nil {
+	if relPath == "/" {
+		http.Error(w, "path must not be root; use /prune or /reindex to clear the index", http.StatusBadRequest)
+		return
+	}
+	if err := d.store.DeletePathRecursive(ctx, indexID, relPath); err != nil {
 		http.Error(w, fmt.Sprintf("delete failed: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -701,7 +705,7 @@ const openapiSpec = `{
     "/entrycount": { "get": { "summary": "Count files and directories at and under a path (recursive, includes the path itself)", "description": "Returns counts of all entries with relative_path equal to or under the given path. The path itself is included: for path=/foo, /foo counts in dirs; for path=/, the root / entry counts in dirs. Because indexes.num_dirs excludes the root directory, dirs from this endpoint at path=/ will be indexes.num_dirs + 1.", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"}, "description": "Path to count (defaults to /)" }], "responses": { "200": {"description": "{path, files, dirs}"}, "400": {"description": "Invalid path"} } } },
     "/entries": { "get": { "summary": "List entries (returns type: folder/file)", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"} }, { "in": "query", "name": "recursive", "schema": {"type": "boolean"} }, { "in": "query", "name": "limit", "schema": {"type": "integer"} }, { "in": "query", "name": "offset", "schema": {"type": "integer"} }], "responses": { "200": {"description": "Entries with type field indicating folder or file"} } } },
     "/add": { "post": { "summary": "Upsert entry", "responses": { "200": {"description": "OK"} } } },
-    "/delete": { "delete": { "summary": "Delete entry", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"} }], "responses": { "200": {"description": "OK"} } } },
+    "/delete": { "delete": { "summary": "Delete entry; for directories, deletes the whole subtree", "parameters": [{ "in": "query", "name": "path", "schema": {"type": "string"} }], "responses": { "200": {"description": "OK"}, "400": {"description": "Bad request (invalid path or root)"} } } },
     "/config": { "get": { "summary": "Get persisted daemon configuration", "responses": { "200": {"description": "Configuration JSON"} } }, "put": { "summary": "Update persisted daemon configuration over the Unix socket", "responses": { "200": {"description": "Configuration JSON"}, "403": {"description": "Unix socket required"}, "409": {"description": "Indexer running"} } } }
   }
 }`

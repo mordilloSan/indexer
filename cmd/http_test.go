@@ -124,6 +124,202 @@ func TestHandleAddAndDelete(t *testing.T) {
 	}
 }
 
+// Deleting a directory must remove the directory row plus every descendant,
+// roll up the total size to ancestors, and leave unrelated siblings alone.
+func TestHandleDeleteDirectorySubtree(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+	}()
+
+	d := &daemon{
+		cfg: DaemonConfig{
+			IndexName: "test",
+			IndexPath: "/",
+			DBPath:    dbPath,
+		},
+		db:    db,
+		store: storage.NewStoreWithDB(db, dbPath),
+	}
+
+	if _, err := db.Exec(`
+		INSERT INTO indexes (
+			name, root_path, source, include_hidden,
+			num_dirs, num_files, total_size, disk_used,
+			disk_total, last_indexed, index_duration_ms,
+			export_duration_ms, vacuum_duration_ms
+		) VALUES (?, ?, ?, 0, 0, 0, 0, 0, 0, strftime('%s','now'), 0, 0, 0);
+	`, d.cfg.IndexName, d.cfg.IndexPath, d.cfg.IndexPath); err != nil {
+		t.Fatalf("insert index: %v", err)
+	}
+	store := storage.NewStoreWithDB(db, dbPath)
+	indexID, err := store.LatestIndexID(context.Background())
+	if err != nil {
+		t.Fatalf("latest index id: %v", err)
+	}
+
+	seedDir := func(rel string) {
+		entry := indexing.IndexEntry{
+			RelativePath: rel,
+			AbsolutePath: rel,
+			Name:         rel,
+			Size:         0,
+			ModTime:      time.Now(),
+			Type:         "directory",
+		}
+		if _, err := storage.UpdateEntry(context.Background(), db, indexID, entry); err != nil {
+			t.Fatalf("seed dir %s: %v", rel, err)
+		}
+	}
+	seedDir("/")
+	seedDir("/docs")
+	seedDir("/docs/sub")
+	seedDir("/other")
+
+	addFile := func(path string, size int64) {
+		payload := map[string]any{
+			"path":   path,
+			"name":   filepath.Base(path),
+			"size":   size,
+			"type":   "file",
+			"hidden": false,
+		}
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/add", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		d.handleAdd(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("handleAdd %s status = %d, body=%s", path, rec.Code, rec.Body.String())
+		}
+	}
+	addFile("/docs/sub/a.txt", 100)
+	addFile("/docs/sub/b.txt", 200)
+	addFile("/other/c.txt", 50)
+
+	assertSize := func(rel string, want int64) {
+		t.Helper()
+		var got int64
+		if err := db.QueryRow(`SELECT size FROM entries WHERE relative_path = ?`, rel).Scan(&got); err != nil {
+			t.Fatalf("query size %s: %v", rel, err)
+		}
+		if got != want {
+			t.Fatalf("size for %s = %d, want %d", rel, got, want)
+		}
+	}
+	assertSize("/docs/sub", 300)
+	assertSize("/docs", 300)
+	assertSize("/other", 50)
+	assertSize("/", 350)
+
+	delReq := httptest.NewRequest(http.MethodDelete, "/delete?path=/docs/sub", nil)
+	delRec := httptest.NewRecorder()
+	d.handleDelete(delRec, delReq)
+	if delRec.Code != http.StatusOK {
+		t.Fatalf("handleDelete status = %d, body=%s", delRec.Code, delRec.Body.String())
+	}
+
+	var subtreeCount int
+	if err := db.QueryRow(`
+		SELECT COUNT(*) FROM entries
+		WHERE relative_path = '/docs/sub' OR relative_path LIKE '/docs/sub/%'
+	`).Scan(&subtreeCount); err != nil {
+		t.Fatalf("count subtree rows: %v", err)
+	}
+	if subtreeCount != 0 {
+		t.Fatalf("subtree rows still present after delete: %d", subtreeCount)
+	}
+
+	assertSize("/docs", 0)
+	assertSize("/", 50)
+
+	var otherCount int
+	if err := db.QueryRow(`
+		SELECT COUNT(*) FROM entries
+		WHERE relative_path = '/other' OR relative_path LIKE '/other/%'
+	`).Scan(&otherCount); err != nil {
+		t.Fatalf("count sibling rows: %v", err)
+	}
+	if otherCount != 2 {
+		t.Fatalf("sibling subtree row count = %d, want 2", otherCount)
+	}
+	assertSize("/other", 50)
+	assertSize("/other/c.txt", 50)
+}
+
+// Deleting the root must be rejected so the cascading delete cannot wipe the
+// whole index in one call.
+func TestHandleDeleteRejectsRoot(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+	}()
+
+	d := &daemon{
+		cfg: DaemonConfig{
+			IndexName: "test",
+			IndexPath: "/",
+			DBPath:    dbPath,
+		},
+		db:    db,
+		store: storage.NewStoreWithDB(db, dbPath),
+	}
+
+	if _, err := db.Exec(`
+		INSERT INTO indexes (
+			name, root_path, source, include_hidden,
+			num_dirs, num_files, total_size, disk_used,
+			disk_total, last_indexed, index_duration_ms,
+			export_duration_ms, vacuum_duration_ms
+		) VALUES (?, ?, ?, 0, 0, 0, 0, 0, 0, strftime('%s','now'), 0, 0, 0);
+	`, d.cfg.IndexName, d.cfg.IndexPath, d.cfg.IndexPath); err != nil {
+		t.Fatalf("insert index: %v", err)
+	}
+	store := storage.NewStoreWithDB(db, dbPath)
+	indexID, err := store.LatestIndexID(context.Background())
+	if err != nil {
+		t.Fatalf("latest index id: %v", err)
+	}
+	if _, err := storage.UpdateEntry(context.Background(), db, indexID, indexing.IndexEntry{
+		RelativePath: "/",
+		AbsolutePath: "/",
+		Name:         "/",
+		ModTime:      time.Now(),
+		Type:         "directory",
+	}); err != nil {
+		t.Fatalf("seed root: %v", err)
+	}
+
+	for _, path := range []string{"/delete?path=/", "/delete?path=", "/delete?path=%2F"} {
+		// "" is rejected by the empty-path guard; "/" and "%2F" exercise the root guard.
+		req := httptest.NewRequest(http.MethodDelete, path, nil)
+		rec := httptest.NewRecorder()
+		d.handleDelete(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("handleDelete %s status = %d, want 400, body=%s", path, rec.Code, rec.Body.String())
+		}
+	}
+
+	var rootCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM entries WHERE relative_path = '/'`).Scan(&rootCount); err != nil {
+		t.Fatalf("count root row: %v", err)
+	}
+	if rootCount != 1 {
+		t.Fatalf("root row count = %d, want 1 (root delete should not run)", rootCount)
+	}
+}
+
 func TestHandleConfigPutRequiresUnixSocket(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "indexer.json")
 	d := &daemon{
