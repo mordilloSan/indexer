@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -28,5 +29,69 @@ func TestOperationLockExcludesConcurrentAcquire(t *testing.T) {
 	}
 	if err := lock.Close(); err != nil {
 		t.Fatalf("close second lock: %v", err)
+	}
+}
+
+func TestOperationLockDoubleCloseIsSafe(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+
+	lock, err := tryAcquireOperationLock(dbPath)
+	if err != nil {
+		t.Fatalf("tryAcquireOperationLock: %v", err)
+	}
+
+	if err := lock.Close(); err != nil {
+		t.Fatalf("first close: %v", err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatalf("second close: %v", err)
+	}
+}
+
+func TestOperationLockNilReceiver(t *testing.T) {
+	var lock *operationLock
+	if err := lock.Close(); err != nil {
+		t.Fatalf("nil-receiver Close: %v", err)
+	}
+}
+
+func TestOperationLockCreatesParentDirectory(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "nested", "subdir", "index.db")
+
+	lock, err := tryAcquireOperationLock(dbPath)
+	if err != nil {
+		t.Fatalf("tryAcquireOperationLock: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := lock.Close(); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	})
+
+	if _, err := os.Stat(dbPath + ".lock"); err != nil {
+		t.Fatalf("lock file missing at %q: %v", dbPath+".lock", err)
+	}
+}
+
+func TestOperationLockOpenFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; file mode permissions don't apply")
+	}
+
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o500); err != nil {
+		t.Fatalf("chmod parent: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(parent, 0o700)
+	})
+
+	dbPath := filepath.Join(parent, "index.db")
+	_, err := tryAcquireOperationLock(dbPath)
+	if err == nil {
+		t.Fatalf("expected acquire to fail under read-only parent dir")
+	}
+	if errors.Is(err, errOperationAlreadyRunning) {
+		t.Fatalf("expected non-contention error, got %v", err)
 	}
 }

@@ -55,6 +55,8 @@ type daemon struct {
 	usedSystemdSock  bool
 	activeRequests   atomic.Int64
 	lastActivityUnix atomic.Int64
+	bgCtx            context.Context
+	bgCancel         context.CancelFunc
 }
 
 const databaseCheckTimeout = 30 * time.Second
@@ -157,6 +159,11 @@ func NewDaemon(cfg DaemonConfig) (*daemon, error) {
 
 func (d *daemon) Close() {
 	slog.Info("shutting down daemon")
+
+	// Signal in-flight background work to cancel before tearing down servers/db.
+	if d.bgCancel != nil {
+		d.bgCancel()
+	}
 
 	// Gracefully shutdown HTTP servers
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -275,6 +282,9 @@ func systemdUnixListener() net.Listener {
 func (d *daemon) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	d.bgCtx = runCtx
+	d.bgCancel = cancel
 
 	if d.configSnapshot().Interval > 0 {
 		go d.startScheduler(runCtx)
@@ -448,20 +458,22 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 		d.SpawnInitialIndex(ctx)
 	}
 
-	select {
-	case <-ctx.Done():
+	shutdownServers := func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 		for _, srv := range d.servers {
-			if err := srv.Shutdown(context.Background()); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				slog.Warn("server shutdown error", "err", err)
 			}
 		}
+	}
+
+	select {
+	case <-ctx.Done():
+		shutdownServers()
 		return nil
 	case err := <-errCh:
-		for _, srv := range d.servers {
-			if shutdownErr := srv.Shutdown(context.Background()); shutdownErr != nil && !errors.Is(shutdownErr, http.ErrServerClosed) {
-				slog.Warn("server shutdown error", "err", shutdownErr)
-			}
-		}
+		shutdownServers()
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}

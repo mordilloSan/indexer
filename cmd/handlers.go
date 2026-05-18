@@ -3,7 +3,6 @@ package cmd
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -43,7 +42,7 @@ func (d *daemon) handleIndex(w http.ResponseWriter, r *http.Request) {
 			Operation: "index",
 		})
 
-		if err := d.runIndexSubprocess(context.Background()); err != nil {
+		if err := d.runIndexSubprocess(d.bgCtx); err != nil {
 			slog.Error("manual index failed", "err", err)
 			sendSSEError(stream, fmt.Sprintf("index failed: %v", err))
 			return
@@ -109,7 +108,7 @@ func (d *daemon) handleReindex(w http.ResponseWriter, r *http.Request) {
 			Operation: "reindex",
 			Path:      normalizedPath,
 		})
-		d.reindexPathWithProgress(context.Background(), normalizedPath, stream)
+		d.reindexPathWithProgress(d.bgCtx, normalizedPath, stream)
 	}()
 
 	writeJSONStatus(w, http.StatusAccepted, map[string]string{
@@ -153,7 +152,7 @@ func (d *daemon) handleVacuum(w http.ResponseWriter, r *http.Request) {
 			Status:    "running",
 			Operation: "vacuum",
 		})
-		d.vacuumWithProgress(context.Background(), stream)
+		d.vacuumWithProgress(d.bgCtx, stream)
 	}()
 
 	writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "running"})
@@ -174,14 +173,20 @@ func (d *daemon) handlePrune(w http.ResponseWriter, r *http.Request) {
 	maxAgeDays := 30
 
 	if keepLatestStr != "" {
-		if val, err := strconv.Atoi(keepLatestStr); err == nil && val >= 1 {
-			keepLatest = val
+		val, err := strconv.Atoi(keepLatestStr)
+		if err != nil || val < 1 {
+			http.Error(w, "keep_latest must be a positive integer", http.StatusBadRequest)
+			return
 		}
+		keepLatest = val
 	}
 	if maxAgeDaysStr != "" {
-		if val, err := strconv.Atoi(maxAgeDaysStr); err == nil && val > 0 {
-			maxAgeDays = val
+		val, err := strconv.Atoi(maxAgeDaysStr)
+		if err != nil || val < 1 {
+			http.Error(w, "max_age_days must be a positive integer", http.StatusBadRequest)
+			return
 		}
+		maxAgeDays = val
 	}
 
 	if !d.tryLockIndex() {
@@ -213,7 +218,7 @@ func (d *daemon) handlePrune(w http.ResponseWriter, r *http.Request) {
 			Status:    "running",
 			Operation: "prune",
 		})
-		d.pruneWithProgress(context.Background(), keepLatest, maxAgeDays, stream)
+		d.pruneWithProgress(d.bgCtx, keepLatest, maxAgeDays, stream)
 	}()
 
 	writeJSONStatus(w, http.StatusAccepted, map[string]string{
