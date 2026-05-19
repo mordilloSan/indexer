@@ -163,6 +163,8 @@ On startup (CLI or systemd), `indexer` logs its version/build info.
 
 HTTP is served on the Unix socket (default) or on the TCP listener if `--listen` is set. The same JSON schema is returned in both cases.
 
+Mutating requests (`POST`, `PUT`, `DELETE`) require a Unix socket caller running as root. Prefix those examples with `sudo` unless the client process is already root.
+
 #### `POST /index`
 
 Trigger a full index in the background.
@@ -388,7 +390,7 @@ Example:
 
 #### `PUT /config`
 
-Update the persisted admin configuration. Writes are accepted only over the Unix socket; TCP requests return `403`.
+Update the persisted admin configuration. Writes require a Unix socket caller running as root; TCP requests and non-root Unix socket callers return `403`.
 
 ```bash
 curl --unix-socket /tmp/indexer.sock -X PUT http://localhost/config \
@@ -396,7 +398,7 @@ curl --unix-socket /tmp/indexer.sock -X PUT http://localhost/config \
   -d '{"index_path":"/data","interval":"6h"}'
 ```
 
-The daemon validates the JSON, writes the config file atomically, and applies runtime-safe fields immediately. Changes to `db_path`, any `db_*` SQLite setting, `socket_path`, or `listen_addr` are persisted but require the disposable API daemon to restart to fully take effect; those responses include `X-Indexer-Restart-Required: true`.
+The daemon validates the JSON, writes the config file atomically, and applies runtime-safe fields immediately. Config writes require a Unix socket caller running as root; TCP requests and non-root Unix socket callers return `403`. Changes to `db_path`, any `db_*` SQLite setting, `socket_path`, or `listen_addr` are persisted but require the disposable API daemon to restart to fully take effect; those responses include `X-Indexer-Restart-Required: true`.
 
 #### `GET /openapi.json`
 
@@ -619,7 +621,7 @@ sudo indexer status
 
 The status overview is intentionally plain: it prints API status, index statistics, and a compact socket/timer summary without pulling in a TUI framework. Use `--watch` to refresh it in place. For detailed units, actions, and logs, use `indexer service status`, `indexer service run-now`, `indexer config apply`, and `indexer service logs`.
 
-The daemon also exposes `GET /config` and Unix-socket-only `PUT /config` for settings UIs. Socket permissions are the local guard; the packaged systemd socket uses `0660`.
+The daemon also exposes `GET /config` and Unix-socket-only `PUT /config` for settings UIs. The packaged systemd socket uses `0666` so local status/config reads work without sudo; mutating requests are gated in the API by Unix peer uid and require root.
 
 Service files are available in the `systemd/` directory for reference.
 

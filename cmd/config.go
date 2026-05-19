@@ -18,9 +18,21 @@ const (
 )
 
 type connectionKindContextKey struct{}
+type peerCredContextKey struct{}
 
-func unixConnContext(ctx context.Context, _ net.Conn) context.Context {
-	return withConnectionKind(ctx, connectionKindUnix)
+type peerCred struct {
+	uid uint32
+	gid uint32
+}
+
+func unixConnContext(ctx context.Context, c net.Conn) context.Context {
+	ctx = withConnectionKind(ctx, connectionKindUnix)
+	if uc, ok := c.(*net.UnixConn); ok {
+		if cred, err := readUnixPeerCred(uc); err == nil {
+			ctx = withPeerCred(ctx, cred)
+		}
+	}
+	return ctx
 }
 
 func tcpConnContext(ctx context.Context, _ net.Conn) context.Context {
@@ -31,9 +43,21 @@ func withConnectionKind(ctx context.Context, kind connectionKind) context.Contex
 	return context.WithValue(ctx, connectionKindContextKey{}, kind)
 }
 
+func withPeerCred(ctx context.Context, cred peerCred) context.Context {
+	return context.WithValue(ctx, peerCredContextKey{}, cred)
+}
+
 func requestFromUnixSocket(r *http.Request) bool {
 	kind, _ := r.Context().Value(connectionKindContextKey{}).(connectionKind)
 	return kind == connectionKindUnix
+}
+
+func peerUIDFromRequest(r *http.Request) (uint32, bool) {
+	cred, ok := r.Context().Value(peerCredContextKey{}).(peerCred)
+	if !ok {
+		return 0, false
+	}
+	return cred.uid, true
 }
 
 func daemonConfigToFileConfig(cfg DaemonConfig) (configfile.Config, error) {

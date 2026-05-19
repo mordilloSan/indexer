@@ -76,6 +76,31 @@ func recoveryMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func requireRootMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isSafeMethod(r.Method) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !requestFromUnixSocket(r) {
+			http.Error(w, "this operation requires a local Unix socket connection", http.StatusForbidden)
+			return
+		}
+		uid, ok := peerUIDFromRequest(r)
+		if !ok || uid != 0 {
+			http.Error(w, "this operation requires root privileges; run with sudo", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isSafeMethod(method string) bool {
+	return method == http.MethodGet ||
+		method == http.MethodHead ||
+		method == http.MethodOptions
+}
+
 // httpErrorLogAdapter routes http.Server.ErrorLog output through slog.
 type httpErrorLogAdapter struct{}
 

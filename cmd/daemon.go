@@ -223,7 +223,7 @@ func (d *daemon) getUnixListener() (net.Listener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen on unix socket: %w", err)
 	}
-	if err := os.Chmod(cfg.SocketPath, 0o660); err != nil {
+	if err := os.Chmod(cfg.SocketPath, 0o666); err != nil {
 		if closeErr := l.Close(); closeErr != nil {
 			slog.Warn("failed to close listener after chmod error", "err", closeErr)
 		}
@@ -428,7 +428,7 @@ func (d *daemon) startHTTP(ctx context.Context) error {
 	mux.HandleFunc("/entries", d.handleEntries)
 	mux.HandleFunc("/config", d.handleConfig)
 
-	handler := d.activityMiddleware(loggerMiddleware(recoveryMiddleware(mux)))
+	handler := d.activityMiddleware(loggerMiddleware(recoveryMiddleware(requireRootMiddleware(mux))))
 	errorLog := log.New(httpErrorLogAdapter{}, "", 0)
 
 	errCh := make(chan error, 2)

@@ -4,9 +4,7 @@ PartOf=indexer.target
 
 [Socket]
 ListenStream=/var/run/indexer.sock
-SocketMode=0660
-SocketUser=root
-SocketGroup=root
+SocketMode=0666
 
 [Install]
 WantedBy=sockets.target
